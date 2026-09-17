@@ -1,0 +1,19 @@
+{
+    "id": "annwn-calendar",
+    "title": "Annwn Calendar - For the Lost Prisoners",
+    "description": "A module designed to track and show the days, months, and years of the Annwn Campaign",
+    "authors":[
+        {
+            "name": "KirbVEVO"
+        }
+    ],
+    "version": "1.0.0",
+    "compatibility": {
+        "minimum": "12",
+        "verified": "14"
+    },
+    "esmodules": ["scripts/main.js"],
+    "styles": ["styles/calendar.css"],
+    "url": "",
+    "manifest": ""
+}

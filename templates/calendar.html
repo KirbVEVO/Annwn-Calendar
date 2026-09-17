@@ -1,0 +1,379 @@
+<div id="landing">
+  <div style="text-align:center;">
+    <div class="landing-title">ANNWN</div>
+    <div class="landing-sub">Campaign Calendar Engine</div>
+  </div>
+  <div class="upload-zone" id="uploadZone">
+    <div class="upload-icon">📜</div>
+    <strong style="color:var(--gold); font-family:'Cinzel',serif;">Load Timeline JSON</strong>
+    <p>Browse or drag your Annwn export file</p>
+    <input type="file" id="fileInput" accept=".json">
+  </div>
+</div>
+
+<div id="app">
+  <div class="topbar">
+    <span class="topbar-brand">⟡ ANNWN</span>
+    <div class="nav-tabs">
+      <button class="nav-tab active" onclick="switchView('home')">⌂ Home</button>
+      <button class="nav-tab" onclick="switchView('cal')">📅 Calendar</button>
+      <button class="nav-tab" onclick="switchView('weather')">🌤 Weather Regions</button>
+      <button class="nav-tab" onclick="switchView('seasons')">🍂 Seasons</button>
+    </div>
+    <div class="topbar-right">
+      <button class="btn-icon" onclick="toggleTheme()">Light</button>
+      <button class="btn-icon" onclick="openSetDateModal()">📍 Set Current Date</button>
+      <button class="btn-icon" onclick="advanceDay()" title="Advance the current in-game date by one day">⏭ Next Day</button>
+      <button class="btn-icon" onclick="exportJSON()">💾 Save</button>
+    </div>
+  </div>
+
+  <div id="views">
+    <div id="homeView">
+      <div class="today-card">
+        <div>
+          <div class="today-date-big" id="homeTodayDate">—</div>
+          <div class="today-date-sub" id="homeTodayWeekday">In-Game Current Date</div>
+        </div>
+        <div class="today-actions">
+          <button class="btn-sm" onclick="goToCurrentDate()">Go to Date →</button>
+          <button class="btn-sm" onclick="openSetDateModal()">Change Date</button>
+        </div>
+      </div>
+      <div class="home-grid">
+        <div class="home-panel">
+          <h3>🎂 Birthdays This Month</h3>
+          <div id="homeBirthdays"></div>
+        </div>
+        <div class="home-panel home-panel-wide">
+          <h3>⚡ Upcoming Events</h3>
+          <div id="homeUpcoming"></div>
+        </div>
+        <div class="home-panel home-panel-wide">
+          <h3>★ Important Events</h3>
+          <div id="homeImportant"></div>
+        </div>
+        <div class="home-panel">
+          <h3>🔁 Recurring This Month</h3>
+          <div id="homeRecurring"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="calView">
+      <div class="cal-sidebar">
+        <div class="sidebar-section">
+          <input type="text" class="search-input" id="sideSearch" placeholder="Search events…" oninput="renderSidebar()">
+        </div>
+        <div class="sidebar-events" id="sideEventList"></div>
+        <div style="padding:12px;">
+          <button onclick="exportJSON()" style="padding:14px; background:var(--primary); color:white; border:none; border-radius:6px; cursor:pointer; font-weight:bold; margin-top: 10px;">SAVE DATA</button>
+        </div>
+      </div>
+      <div class="cal-main">
+        <div class="cal-header">
+          <button class="nav-btn" onclick="changeMonth(-1)">‹</button>
+          <div class="month-title" id="calMonthTitle">Month Year</div>
+          <button class="nav-btn" onclick="changeMonth(1)">›</button>
+          <select class="select-styled" id="monthSelect" onchange="jumpMonth(this.value)"></select>
+          <input type="number" class="year-input-styled" id="yearInput" onchange="jumpYear(this.value)">
+          <select class="select-styled" id="eraSelect" onchange="jumpYear(document.getElementById('yearInput').value)"></select>
+          <button class="today-btn" onclick="goToCurrentDate()">TODAY</button>
+          <select class="select-styled" id="weatherRegionSelect" onchange="selectWeatherRegion(this.value)" title="Weather region" style="max-width:160px;"></select>
+        </div>
+        <div class="cal-content">
+          <div class="cal-grid-wrap" id="calGridWrap"></div>
+          <div class="day-detail-panel" id="dayDetail"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="weatherView">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+        <h2 style="font-family:'Cinzel',serif; color:var(--gold); font-size:1.2rem;">Weather Region Configuration</h2>
+        <div style="display:flex;gap:8px;">
+          <button class="btn-sm" onclick="autoGenerateAllWeather()" title="Auto-fill weather for the entire current year using region profiles and seasons">⚡ Auto-Generate Year</button>
+          <button class="btn-add-event" onclick="openAddRegionModal()">+ Add Region</button>
+        </div>
+      </div>
+      <div id="regionList"></div>
+    </div>
+
+    <div id="seasonsView">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+        <h2 style="font-family:'Cinzel',serif; color:var(--gold); font-size:1.2rem;">Seasons</h2>
+        <button class="btn-add-event" onclick="openAddSeasonModal()">+ Add Season</button>
+      </div>
+      <div id="seasonList"></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="eventModal">
+  <div class="modal-box">
+    <h3 id="eventModalTitle">New Event</h3>
+    <div class="form-group">
+      <label>Event Name *</label>
+      <input type="text" id="evName" placeholder="Battle of the Silver Pass…">
+    </div>
+    <div class="input-row">
+      <div class="form-group">
+        <label>Category</label>
+        <select id="evCategory">
+          <option value="world">World Event</option>
+          <option value="personal">Personal</option>
+          <option value="birthday">Birthday</option>
+          <option value="combat">Combat</option>
+          <option value="time">Time-Sensitive</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Location</label>
+        <input type="text" id="evLocation" placeholder="Silverkeep, The Wastes…">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Description</label>
+      <textarea id="evDesc" rows="3" placeholder="Details…"></textarea>
+    </div>
+    <div class="input-row">
+      <div class="form-group">
+        <label>Start Time</label>
+        <div class="time-row">
+          <input type="number" class="time-input form-group input" id="evStartH" min="0" max="23" placeholder="HH" style="width:56px; padding:8px; background:var(--bg2); border:1px solid var(--border); color:var(--text); border-radius:6px; font-family:inherit; outline:none;">
+          <span style="color:var(--cream-dim)">:</span>
+          <input type="number" class="time-input form-group input" id="evStartM" min="0" max="59" placeholder="MM" style="width:56px; padding:8px; background:var(--bg2); border:1px solid var(--border); color:var(--text); border-radius:6px; font-family:inherit; outline:none;">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>End Time</label>
+        <div class="time-row">
+          <input type="number" class="time-input form-group input" id="evEndH" min="0" max="23" placeholder="HH" style="width:56px; padding:8px; background:var(--bg2); border:1px solid var(--border); color:var(--text); border-radius:6px; font-family:inherit; outline:none;">
+          <span style="color:var(--cream-dim)">:</span>
+          <input type="number" class="time-input form-group input" id="evEndM" min="0" max="59" placeholder="MM" style="width:56px; padding:8px; background:var(--bg2); border:1px solid var(--border); color:var(--text); border-radius:6px; font-family:inherit; outline:none;">
+        </div>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Event Colour</label>
+      <div class="color-picker-row">
+        <div class="color-swatch" id="colorSwatch" onclick="document.getElementById('colorPicker').click()" style="background:#c9a84c;"></div>
+        <input type="color" id="colorPicker" style="display:none;" value="#c9a84c" oninput="updateSwatch(this.value)">
+        <div class="color-presets" id="colorPresets"></div>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Recurrence</label>
+      <div class="recur-options">
+        <div class="recur-chip active" data-recur="none" onclick="selectRecur(this)">None</div>
+        <div class="recur-chip" data-recur="1d" onclick="selectRecur(this)">Daily</div>
+        <div class="recur-chip" data-recur="7d" onclick="selectRecur(this)">Weekly</div>
+        <div class="recur-chip" data-recur="1m" onclick="selectRecur(this)">Monthly</div>
+        <div class="recur-chip" data-recur="1y" onclick="selectRecur(this)">Yearly</div>
+        <div class="recur-chip" data-recur="10y" onclick="selectRecur(this)">Every 10 yrs</div>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Duration (days)</label>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <input type="number" id="evDuration" min="1" max="365" placeholder="1" style="width:80px; padding:8px; background:var(--bg2); border:1px solid var(--border); color:var(--text); border-radius:6px; font-family:inherit; outline:none;">
+        <span style="font-size:0.82rem; color:var(--cream-dim);">Leave blank or 1 for single-day events</span>
+      </div>
+    </div>
+    <div class="form-group" style="margin-top:4px;">
+      <label style="display:flex; align-items:center; gap:10px; cursor:pointer; user-select:none;">
+        <input type="checkbox" id="evImportant" style="width:16px; height:16px; accent-color:var(--primary); cursor:pointer; flex-shrink:0;">
+        <span>★ Mark as Important</span>
+      </label>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="closeEventModal()">Cancel</button>
+      <button class="btn-save" onclick="saveEvent()">Save Event</button>
+    </div>
+    <input type="hidden" id="editingEvId">
+  </div>
+</div>
+
+<div class="modal-overlay" id="weatherModal">
+  <div class="modal-box">
+    <h3>Set Weather</h3>
+    <div id="weatherDateLabel" style="color:var(--cream-dim); font-size:0.85rem; margin-bottom:12px;"></div>
+    <div class="form-group">
+      <label>Condition</label>
+      <div class="weather-grid" id="weatherCondGrid"></div>
+    </div>
+    <div class="input-row">
+      <div class="form-group">
+        <label>Temperature (°C)</label>
+        <input type="number" id="wTemp" placeholder="e.g. 18">
+      </div>
+      <div class="form-group">
+        <label>One-word Description</label>
+        <input type="text" id="wDesc" placeholder="e.g. Misty">
+      </div>
+    </div>
+    <div class="input-row">
+      <div class="form-group">
+        <label>Precipitation (%)</label>
+        <input type="number" id="wPrecip" min="0" max="100" placeholder="0–100">
+      </div>
+      <div class="form-group">
+        <label>Cloud Cover (%)</label>
+        <input type="number" id="wClouds" min="0" max="100" placeholder="0–100">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Apply to Region</label>
+      <select id="wRegion">
+        <option value="">— No Region —</option>
+      </select>
+    </div>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button class="btn-sm" onclick="randomiseWeather()" style="flex:1; text-align:center;">🎲 Randomise from Region</button>
+      <button class="btn-sm" onclick="autoGenerateWeatherForDay(currentYear,currentMonthIdx,weatherDay)" style="flex:1; text-align:center;">⚡ Auto-fill this day</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="closeWeatherModal()">Cancel</button>
+      <button class="btn-save" onclick="saveWeather()">Save Weather</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="setDateModal">
+  <div class="modal-box" style="width:420px;">
+    <h3>Set Current In-Game Date</h3>
+    <div class="current-date-display" id="currentDatePreview">—</div>
+    <div class="input-row">
+      <div class="form-group">
+        <label>Month</label>
+        <select id="sdMonth" class="select-styled" style="width:100%;" onchange="previewCurrentDate()"></select>
+      </div>
+      <div class="form-group">
+        <label>Day</label>
+        <input type="number" id="sdDay" min="1" max="31" placeholder="1" style="width:100%;" oninput="previewCurrentDate()">
+      </div>
+    </div>
+    <div class="input-row">
+      <div class="form-group">
+        <label>Year</label>
+        <input type="number" id="sdYear" placeholder="534" style="width:100%;" oninput="previewCurrentDate()">
+      </div>
+      <div class="form-group">
+        <label>Era</label>
+        <select id="sdEra" class="select-styled" style="width:100%;" onchange="previewCurrentDate()"></select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="document.getElementById('setDateModal').classList.remove('open')">Cancel</button>
+      <button class="btn-save" onclick="saveCurrentDate()">Set Date</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="seasonModal">
+  <div class="modal-box" style="width:500px;">
+    <h3 id="seasonModalTitle">Add Season</h3>
+    <div class="input-row">
+      <div class="form-group">
+        <label>Season Name</label>
+        <input type="text" id="sName" placeholder="Spring, Winter, Dry Season…">
+      </div>
+      <div class="form-group">
+        <label>Colour</label>
+        <input type="color" id="sColor" value="#2ecc71" style="width:100%; height:42px; border-radius:6px; border:1px solid var(--border); background:var(--bg2); cursor:pointer;">
+      </div>
+    </div>
+    <div class="input-row">
+      <div class="form-group">
+        <label>Start Month</label>
+        <select id="sStartMonth" class="select-styled" style="width:100%;"></select>
+      </div>
+      <div class="form-group">
+        <label>Start Day</label>
+        <input type="number" id="sStartDay" min="1" max="31" placeholder="1" style="width:100%;">
+      </div>
+    </div>
+    <div class="input-row">
+      <div class="form-group">
+        <label>End Month</label>
+        <select id="sEndMonth" class="select-styled" style="width:100%;"></select>
+      </div>
+      <div class="form-group">
+        <label>End Day</label>
+        <input type="number" id="sEndDay" min="1" max="31" placeholder="30" style="width:100%;">
+      </div>
+    </div>
+    <hr class="divider">
+    <div style="font-family:'Cinzel',serif; font-size:0.8rem; color:var(--primary); letter-spacing:0.08em; margin-bottom:10px;">SEASONAL TEMPERATURE PROFILE</div>
+    <div style="display:flex; gap:8px; margin-bottom:10px;">
+      <button type="button" id="sModeOverride" class="recur-chip active" onclick="setSeasonTempMode('override')">Override region temp</button>
+      <button type="button" id="sModeOffset"   class="recur-chip"        onclick="setSeasonTempMode('offset')">Offset from region temp</button>
+    </div>
+    <p id="sTemperatureHint" style="font-size:0.8rem; color:var(--cream-dim); margin-bottom:10px;">Sets an absolute temperature for this season, ignoring the region. Leave blank to use the region default.</p>
+    <div class="input-row">
+      <div class="form-group">
+        <label id="sBaseTempLabel">Season Base Temp (°C)</label>
+        <input type="number" id="sBaseTemp" placeholder="e.g. 5 for winter">
+      </div>
+      <div class="form-group">
+        <label>Temp Variance (±°C)</label>
+        <input type="number" id="sTempVar" min="0" max="30" placeholder="e.g. 4">
+      </div>
+    </div>
+    <div class="input-row">
+      <div class="form-group">
+        <label id="sRainLabel">Rain Chance Override (%)</label>
+        <input type="number" id="sRain" min="-100" max="100" placeholder="leave blank = region default">
+      </div>
+      <div class="form-group">
+        <label id="sStormLabel">Storm Chance Override (%)</label>
+        <input type="number" id="sStorm" min="-100" max="100" placeholder="leave blank = region default">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="document.getElementById('seasonModal').classList.remove('open')">Cancel</button>
+      <button class="btn-save" onclick="saveSeason()">Save Season</button>
+    </div>
+    <input type="hidden" id="editingSeasonId">
+  </div>
+</div>
+
+<div class="modal-overlay" id="regionModal">
+  <div class="modal-box" style="width:480px;">
+    <h3>Weather Region</h3>
+    <div class="form-group">
+      <label>Region Name</label>
+      <input type="text" id="rName" placeholder="The Thornwood, Coastal Reach…">
+    </div>
+    <div class="form-group">
+      <label>Base Temperature (°C)</label>
+      <input type="number" id="rBaseTemp" placeholder="15">
+    </div>
+    <div class="slider-row">
+      <label>Rain Chance</label>
+      <input type="range" id="rRain" min="0" max="100" value="30" oninput="document.getElementById('rRainV').innerText=this.value+'%'">
+      <span class="slider-val" id="rRainV">30%</span>
+    </div>
+    <div class="slider-row">
+      <label>Cloud Cover</label>
+      <input type="range" id="rClouds" min="0" max="100" value="40" oninput="document.getElementById('rCloudsV').innerText=this.value+'%'">
+      <span class="slider-val" id="rCloudsV">40%</span>
+    </div>
+    <div class="slider-row">
+      <label>Storm Frequency</label>
+      <input type="range" id="rStorm" min="0" max="100" value="10" oninput="document.getElementById('rStormV').innerText=this.value+'%'">
+      <span class="slider-val" id="rStormV">10%</span>
+    </div>
+    <div class="slider-row">
+      <label>Temp Variance</label>
+      <input type="range" id="rTempVar" min="0" max="20" value="5" oninput="document.getElementById('rTempVarV').innerText='±'+this.value+'°'">
+      <span class="slider-val" id="rTempVarV">±5°</span>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="document.getElementById('regionModal').classList.remove('open')">Cancel</button>
+      <button class="btn-save" onclick="saveRegion()">Save Region</button>
+    </div>
+    <input type="hidden" id="editingRegionId">
+  </div>
+</div>
+
