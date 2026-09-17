@@ -15,5 +15,6 @@
     "esmodules": ["scripts/main.js"],
     "styles": ["styles/calendar.css"],
     "url": "",
-    "manifest": ""
+    "manifest": "",
+    "download": "https://github.com/KirbVEVO/Annwn-Calendar/archive/refs/heads/main.zip"
 }
