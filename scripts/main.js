@@ -9,7 +9,7 @@ class AnnwnCalendarApp extends HandlebarsApplicationMixin(ApplicationV2) {
   };
 
   static PARTS = {
-    calendar: { template: "modules/annwn-calendar/templates/calendar.html" }
+    calendar: { template: "modules/Annwn-Calendar/templates/calendar.html" }
   };
 }
 
