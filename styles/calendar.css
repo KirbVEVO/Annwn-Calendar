@@ -270,7 +270,7 @@
 
 .cal-content { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
 
-.cal-grid-wrap { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+.cal-grid-wrap { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05); flex: 0 0 auto; }
 .weekday-header {
   display: grid; background: var(--bg3); border-bottom: 2px solid var(--primary-light); padding: 8px 0;
 }
@@ -306,13 +306,51 @@
 
 .day-detail-panel {
   background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
-  padding: 20px; display: none; box-shadow: 0 4px 15px rgba(0,0,0,0.05); margin-bottom: 40px;
+  padding: 20px; display: none; box-shadow: 0 4px 15px rgba(0,0,0,0.05); margin-bottom: 24px;
+  /* Fixed height: the panel always sits in the same place under the
+     calendar no matter how many events the day holds. */
+  flex: 0 0 auto;
+  height: 300px;
+  flex-direction: column;
+  overflow: hidden;
 }
-.day-detail-panel.open { display: block; }
-.day-detail-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 16px; }
-.day-detail-title { font-family: 'Cinzel', serif; font-size: 1.3rem; color: var(--gold); }
+.day-detail-panel.open { display: flex; }
+.day-detail-header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 14px; flex-shrink: 0; gap: 12px; }
+.day-detail-heading { min-width: 0; }
+
+/* Flex + centre so the season pill lines up with the date rather than
+   dropping to the text baseline. */
+.day-detail-title {
+  font-family: 'Cinzel', serif; font-size: 1.3rem; color: var(--gold);
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
 .day-detail-weekday { font-size: 0.85rem; color: var(--cream-dim); margin-top: 2px; }
-.detail-actions { display: flex; gap: 8px; }
+.detail-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+/* The overflow lives here now, so a day with twenty events scrolls
+   internally instead of growing the panel. */
+.day-detail-events {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
+  padding-right: 4px;
+}
+.day-detail-events::-webkit-scrollbar { width: 8px; }
+.day-detail-events::-webkit-scrollbar-track { background: transparent; }
+.day-detail-events::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.day-detail-events::-webkit-scrollbar-thumb:hover { background: var(--border-light); }
+
+.season-badge {
+  display: inline-block; padding: 1px 8px; border-radius: 10px;
+  font-family: 'Crimson Pro', serif; font-size: 0.72rem; line-height: 1.5;
+  border: 1px solid transparent; white-space: nowrap;
+}
+.event-count-badge {
+  display: inline-block; padding: 1px 8px; border-radius: 10px;
+  font-family: 'Crimson Pro', serif; font-size: 0.72rem; line-height: 1.5;
+  background: var(--bg3); color: var(--cream-dim); border: 1px solid var(--border);
+  white-space: nowrap;
+}
 
 .btn-sm {
   background: var(--bg3); border: 1px solid var(--border); color: var(--cream-dim);
@@ -487,4 +525,51 @@
   white-space: nowrap;
 }
 .side-event-item .event-byline { margin-left: 0; margin-top: 4px; }
+
+/* --- forecast ---------------------------------------------------------- */
+#forecastView { flex: 1; overflow-y: auto; padding: 24px; display: none; }
+#forecastView.active { display: block; }
+
+.forecast-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; margin-bottom: 20px; flex-wrap: wrap;
+}
+.forecast-head h2 {
+  font-family: 'Cinzel', serif; color: var(--gold); font-size: 1.5rem;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0;
+}
+#forecastRegionSelect { max-width: 220px; }
+
+.forecast-hero {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+  padding: 28px; text-align: center; margin-bottom: 20px;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+}
+.forecast-hero-cond {
+  font-family: 'Cinzel', serif; font-size: 1.6rem; color: var(--primary);
+  letter-spacing: 0.06em;
+}
+.forecast-hero-temp {
+  font-family: 'Cinzel', serif; font-size: 3rem; color: var(--gold);
+  line-height: 1.2; margin: 6px 0;
+}
+.forecast-hero-desc { font-size: 0.95rem; color: var(--cream-dim); font-style: italic; }
+.forecast-hero-region { font-size: 0.8rem; color: var(--cream-dim); margin-top: 10px; }
+
+.forecast-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 16px;
+}
+.forecast-card {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+  padding: 18px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+}
+.forecast-card-icon { font-size: 1.8rem; line-height: 1; }
+.forecast-card-label {
+  font-size: 0.72rem; color: var(--cream-dim); text-transform: uppercase;
+  letter-spacing: 0.08em; margin-top: 8px;
+}
+.forecast-card-value {
+  font-family: 'Cinzel', serif; font-size: 1.05rem; color: var(--cream); margin-top: 4px;
+}
 }

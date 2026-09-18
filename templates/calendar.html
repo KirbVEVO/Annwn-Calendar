@@ -19,11 +19,13 @@
       <div class="nav-tabs">
         <button class="nav-tab active" data-view="home" onclick="switchView('home')">⌂ Home</button>
         <button class="nav-tab" data-view="cal" onclick="switchView('cal')">📅 Calendar</button>
+        <button class="nav-tab" data-view="forecast" onclick="switchView('forecast')">🔮 Forecast</button>
         <button class="nav-tab gm-only" data-view="weather" onclick="switchView('weather')">🌤 Weather Regions</button>
         <button class="nav-tab gm-only" data-view="seasons" onclick="switchView('seasons')">🍂 Seasons</button>
       </div>
       <div class="topbar-right">
         <button class="btn-icon" onclick="toggleTheme()">Light</button>
+        <button class="btn-icon" id="tempUnitBtn" onclick="toggleTempUnit()" title="Switch between Celsius and Fahrenheit">°C</button>
         <button class="btn-icon gm-only" onclick="openSetDateModal()">📍 Set Current Date</button>
         <button class="btn-icon gm-only" onclick="advanceDay()" title="Advance the current in-game date by one day">⏭ Next Day</button>
         </div>
@@ -84,6 +86,14 @@
             <div class="day-detail-panel" id="dayDetail"></div>
           </div>
         </div>
+      </div>
+
+      <div id="forecastView">
+        <div class="forecast-head">
+          <h2 id="forecastTitle">—</h2>
+          <select class="select-styled" id="forecastRegionSelect" onchange="selectForecastRegion(this.value)" title="Weather region"></select>
+        </div>
+        <div id="forecastBody"></div>
       </div>
 
       <div id="weatherView">
@@ -202,7 +212,7 @@
       </div>
       <div class="input-row">
         <div class="form-group">
-          <label>Temperature (°C)</label>
+          <label id="wTempLabel">Temperature (°C)</label>
           <input type="number" id="wTemp" placeholder="e.g. 18">
         </div>
         <div class="form-group">

@@ -271,6 +271,8 @@ function launchApp() {
   renderColorPresets();
   syncNavUI();
   syncRegionDropdown();
+  syncForecastRegionDropdown();
+  syncTempUnitButton();
   switchView('home');
 }
 
@@ -282,7 +284,7 @@ function switchView(v) {
     return;
   }
 
-  ['home','cal','weather','seasons'].forEach(id => {
+  ['home','cal','forecast','weather','seasons'].forEach(id => {
     byId(id+'View')?.classList.toggle('active', id===v);
   });
   // Keyed off the tab's own data-view rather than its index, since the
@@ -291,6 +293,7 @@ function switchView(v) {
 
   if(v==='home') renderHome();
   if(v==='cal') renderMonth();
+  if(v==='forecast') renderForecast();
   if(v==='weather') renderRegions();
   if(v==='seasons') renderSeasons();
 }
@@ -662,18 +665,24 @@ function renderDayDetail() {
   ).join('')}</div>` : '';
 
   const season = getSeasonForDay(currentYear, currentMonthIdx, selectedDay);
-  const seasonBadge = season ? `<span style="display:inline-block; margin-left:8px; padding:1px 8px; border-radius:10px; font-size:0.72rem; background:${season.color}33; color:${season.color}; border:1px solid ${season.color}55;">${season.name}</span>` : '';
+  const seasonBadge = season ? `<span class="season-badge" style="background:${season.color}33; color:${season.color}; border-color:${season.color}55;">${escapeHtml(season.name)}</span>` : '';
+
+  const count = effectiveEvents.length;
+  const countBadge = count ? `<span class="event-count-badge">${count} event${count!==1?'s':''}</span>` : '';
 
   panel.innerHTML = `
     <div class="day-detail-header">
-      <div>
-        <div class="day-detail-title">${month.name} ${selectedDay}, ${Math.abs(currentYear)} ${era}${seasonBadge}</div>
-        <div class="day-detail-weekday">${weekday}${weatherDisplay}</div>
+      <div class="day-detail-heading">
+        <div class="day-detail-title">
+          <span>${escapeHtml(month.name)} ${selectedDay}, ${Math.abs(currentYear)} ${era}</span>
+          ${seasonBadge}${countBadge}
+        </div>
+        <div class="day-detail-weekday">${escapeHtml(weekday)}${weatherDisplay}</div>
         ${moonHtml}
       </div>
       <div class="detail-actions">${weatherBtn}${setTodayBtn}${addBtn}</div>
     </div>
-    ${evHtml}`;
+    <div class="day-detail-events">${evHtml}</div>`;
 }
 
 function renderSidebar() {
@@ -823,7 +832,10 @@ function applyEventOp(op, userId) {
 /** Entry point for every event change made through the UI. */
 async function submitEventOp(op) {
   if (isGM()) {
-    if (!applyEventOp(op, game.user.id)) return false;
+    if (!applyEventOp(op, game.user.id)) {
+      ui.notifications.warn("That change could not be applied.");
+      return false;
+    }
     await saveAppData();
     refreshEventViews();
     return true;
@@ -833,17 +845,54 @@ async function submitEventOp(op) {
     ui.notifications.error("No Game Master is online, so calendar changes can't be saved right now.");
     return false;
   }
-  game.socket.emit(SOCKET_NAME, { type: "eventOp", op, userId: game.user.id });
+
+  const requestId = uid();
+  _pendingOps.set(requestId, setTimeout(() => {
+    _pendingOps.delete(requestId);
+    ui.notifications.error(
+      "The GM's client didn't confirm that change. If this keeps happening, make sure everyone has reloaded since the last module update."
+    );
+  }, 8000));
+
+  game.socket.emit(SOCKET_NAME, { type: "eventOp", op, userId: game.user.id, requestId });
   return true;
+}
+
+// Outstanding player submissions awaiting a GM acknowledgement. Without
+// this a dropped socket message looks exactly like a no-op button.
+const _pendingOps = new Map();
+
+function sendAck(requestId, userId, ok, reason) {
+  game.socket.emit(SOCKET_NAME, { type: "eventAck", requestId, userId, ok, reason });
 }
 
 /** GM side of the socket. Exactly one GM performs the write so two
  *  connected GMs don't both apply the same change. */
 function onCalendarSocket(data) {
-  if (data?.type !== "eventOp") return;
+  if (!data || typeof data !== "object") return;
+
+  if (data.type === "eventAck") {
+    if (data.userId !== game.user.id) return;
+    const timer = _pendingOps.get(data.requestId);
+    if (timer) { clearTimeout(timer); _pendingOps.delete(data.requestId); }
+    if (!data.ok) ui.notifications.error(data.reason || "That change could not be saved.");
+    return;
+  }
+
+  if (data.type !== "eventOp") return;
   if (!isPrimaryGM()) return;
-  if (!applyEventOp(data.op, data.userId)) return;
-  saveAppData().then(() => refreshEventViews());
+
+  if (!applyEventOp(data.op, data.userId)) {
+    sendAck(data.requestId, data.userId, false, "The change was rejected — you may not have permission to edit that event.");
+    return;
+  }
+  saveAppData().then(() => {
+    refreshEventViews();
+    sendAck(data.requestId, data.userId, true);
+  }).catch(err => {
+    console.error(`${MODULE_ID} | failed to save player change`, err);
+    sendAck(data.requestId, data.userId, false, "The GM's client failed to save that change.");
+  });
 }
 
 function saveEvent() {
@@ -957,6 +1006,102 @@ function getEffectiveEvents() {
   return result;
 }
 
+// --- forecast view ----------------------------------------------------
+
+let forecastRegionId = null;
+
+function selectForecastRegion(id) {
+  forecastRegionId = id || null;
+  renderForecast();
+}
+
+/** Region dropdown for the forecast page. Unlike the calendar header's
+ *  copy this is available to players too — it only changes what they're
+ *  looking at, it doesn't configure anything. */
+function syncForecastRegionDropdown() {
+  const el = byId('forecastRegionSelect');
+  if(!el) return;
+  const regions = appData.regions || [];
+  if(!regions.length) {
+    el.innerHTML = '<option value="">No regions defined</option>';
+    return;
+  }
+  if(!regions.find(r => r.id === forecastRegionId)) {
+    forecastRegionId = selectedWeatherRegionId || regions[0].id;
+  }
+  el.innerHTML = regions.map(r =>
+    `<option value="${r.id}" ${r.id===forecastRegionId?'selected':''}>${escapeHtml(r.name)}</option>`
+  ).join('');
+  el.value = forecastRegionId;
+}
+
+function renderForecast() {
+  const titleEl = byId('forecastTitle');
+  const bodyEl = byId('forecastBody');
+  if(!titleEl || !bodyEl) return;
+
+  syncForecastRegionDropdown();
+
+  const { year, month, day } = currentGameDate;
+  const monthName = cal.months[month]?.name || '?';
+  const weekday = getWeekdayName(year, month, day);
+  const era = getEraAbbr(year);
+  const season = getSeasonForDay(year, month, day);
+
+  titleEl.innerHTML = `${escapeHtml(weekday)}, ${day} ${escapeHtml(monthName)} ${Math.abs(year)} ${era}`
+    + (season ? ` <span class="season-badge" style="background:${season.color}33; color:${season.color}; border-color:${season.color}55;">${escapeHtml(season.name)}</span>` : '');
+
+  const regions = appData.regions || [];
+  const region = regions.find(r => r.id === forecastRegionId) || regions[0] || null;
+
+  // A manually set forecast wins, but only if it belongs to this region.
+  let weather = (appData.weather||{})[weatherKey(year, month, day)];
+  if(region && weather && weather.region && weather.region !== region.id) weather = null;
+  if(!weather && region) weather = autoWeatherForDay(year, month, day, region);
+
+  if(!weather) {
+    bodyEl.innerHTML = '<div class="no-events" style="padding:24px;">No weather available. Add a weather region to generate a forecast.</div>';
+    return;
+  }
+
+  const cond = WEATHER_CONDITIONS.find(w => w.id === weather.condition);
+  const absDay = toAbsDay(year, month, day);
+  const moons = cal.moons || [];
+
+  const moonCards = moons.map(moon => `
+    <div class="forecast-card">
+      <div class="forecast-card-icon">${getMoonPhaseIcon(moon, absDay)}</div>
+      <div class="forecast-card-label">${escapeHtml(moon.name)}</div>
+      <div class="forecast-card-value">${getMoonPhaseName(moon, absDay)}</div>
+    </div>`).join('');
+
+  bodyEl.innerHTML = `
+    <div class="forecast-hero">
+      <div class="forecast-hero-cond">${cond?.label || weather.condition}</div>
+      <div class="forecast-hero-temp">${weather.temp!==undefined ? formatTemp(weather.temp) : '—'}</div>
+      <div class="forecast-hero-desc">${escapeHtml(weather.desc || '')}${weather.auto ? ' <span class="auto-weather-badge">(auto-generated)</span>' : ''}</div>
+      ${region ? `<div class="forecast-hero-region">📍 ${escapeHtml(region.name)}</div>` : ''}
+    </div>
+    <div class="forecast-grid">
+      <div class="forecast-card">
+        <div class="forecast-card-icon">🌡</div>
+        <div class="forecast-card-label">Temperature</div>
+        <div class="forecast-card-value">${weather.temp!==undefined ? formatTemp(weather.temp) : '—'}</div>
+      </div>
+      <div class="forecast-card">
+        <div class="forecast-card-icon">💧</div>
+        <div class="forecast-card-label">Precipitation</div>
+        <div class="forecast-card-value">${weather.precip!==undefined ? weather.precip+'%' : '—'}</div>
+      </div>
+      <div class="forecast-card">
+        <div class="forecast-card-icon">☁️</div>
+        <div class="forecast-card-label">Cloud Cover</div>
+        <div class="forecast-card-value">${weather.clouds!==undefined ? weather.clouds+'%' : '—'}</div>
+      </div>
+      ${moonCards}
+    </div>`;
+}
+
 function openWeatherModal(day) {
   if (!requireGM("set the weather")) return;
   weatherDay = day;
@@ -965,9 +1110,10 @@ function openWeatherModal(day) {
   byId('weatherDateLabel').textContent = `${m.name} ${day}, ${Math.abs(currentYear)} ${era}`;
 
   const existing = (appData.weather||{})[weatherKey(currentYear,currentMonthIdx,day)];
+  syncWeatherModalUnit();
   if(existing) {
     selectedWeatherCond = existing.condition;
-    byId('wTemp').value = existing.temp!==undefined ? existing.temp : '';
+    byId('wTemp').value = existing.temp!==undefined ? tempToInput(existing.temp) : '';
     byId('wDesc').value = existing.desc||'';
     byId('wPrecip').value = existing.precip!==undefined ? existing.precip : '';
     byId('wClouds').value = existing.clouds!==undefined ? existing.clouds : '';
@@ -985,6 +1131,12 @@ function openWeatherModal(day) {
 }
 
 function closeWeatherModal() { byId('weatherModal').classList.remove('open'); }
+
+/** Relabel the modal's temperature field for the viewer's chosen unit. */
+function syncWeatherModalUnit() {
+  const label = byId('wTempLabel');
+  if (label) label.textContent = `Temperature (${formatTempUnit()})`;
+}
 
 function buildWeatherCondGrid() {
   const el = byId('weatherCondGrid');
@@ -1005,7 +1157,7 @@ function saveWeather() {
   if(!appData.weather) appData.weather = {};
   appData.weather[key] = {
     condition: selectedWeatherCond,
-    temp: byId('wTemp').value !== '' ? parseFloat(byId('wTemp').value) : undefined,
+    temp: tempFromInput(byId('wTemp').value),
     desc: byId('wDesc').value,
     precip: byId('wPrecip').value !== '' ? parseFloat(byId('wPrecip').value) : undefined,
     clouds: byId('wClouds').value !== '' ? parseFloat(byId('wClouds').value) : undefined,
@@ -1014,6 +1166,7 @@ function saveWeather() {
   closeWeatherModal();
   saveAppData();
   renderMonth();
+  renderForecast();
   if(selectedDay===weatherDay) renderDayDetail();
 }
 
@@ -1037,7 +1190,7 @@ function randomiseWeather() {
   selectedWeatherCond = cond;
   const temp = Math.round(baseTemp + (Math.random()-0.5)*2*tempVar);
   if(temp < 0 && cond==='rain') cond = selectedWeatherCond = 'snow';
-  byId('wTemp').value = temp;
+  byId('wTemp').value = tempToInput(temp);
   byId('wPrecip').value = cond==='rain'||cond==='storm'||cond==='snow' ? Math.round(40+Math.random()*60) : cond==='cloudy' ? Math.round(10+Math.random()*20) : Math.round(Math.random()*10);
   byId('wClouds').value = cond==='sunny' ? Math.round(Math.random()*20) : cond==='cloudy' ? Math.round(50+Math.random()*40) : Math.round(70+Math.random()*30);
   byId('wDesc').value = cinematicTemp(temp) + (season ? ' ' + season.name : '');
@@ -1090,6 +1243,7 @@ function deleteRegion(id) {
 
 function renderRegions() {
   syncRegionDropdown();
+  syncForecastRegionDropdown();
   const el = byId('regionList');
   const regions = appData.regions||[];
   if(!regions.length) { el.innerHTML = '<div class="no-events" style="padding:24px;">No weather regions defined. Add one to configure regional weather randomisation.</div>'; return; }
@@ -1104,7 +1258,7 @@ function renderRegions() {
         </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:12px;">
-        <div style="text-align:center;"><div style="font-size:1.4rem;">🌡</div><div style="font-size:0.75rem;color:var(--cream-dim)">Base Temp</div><div style="color:var(--cream);font-size:0.9rem;">${formatTemp(r.baseTemp)} ±${r.tempVar}${formatTempUnit()}</div></div>
+        <div style="text-align:center;"><div style="font-size:1.4rem;">🌡</div><div style="font-size:0.75rem;color:var(--cream-dim)">Base Temp</div><div style="color:var(--cream);font-size:0.9rem;">${formatTemp(r.baseTemp)} ± ${formatTempDelta(r.tempVar)}</div></div>
         <div style="text-align:center;"><div style="font-size:1.4rem;">🌧</div><div style="font-size:0.75rem;color:var(--cream-dim)">Rain Chance</div><div style="color:var(--cream);font-size:0.9rem;">${r.rain}%</div></div>
         <div style="text-align:center;"><div style="font-size:1.4rem;">☁️</div><div style="font-size:0.75rem;color:var(--cream-dim)">Cloud Cover</div><div style="color:var(--cream);font-size:0.9rem;">${r.clouds}%</div></div>
         <div style="text-align:center;"><div style="font-size:1.4rem;">⛈</div><div style="font-size:0.75rem;color:var(--cream-dim)">Storm Freq</div><div style="color:var(--cream);font-size:0.9rem;">${r.storm}%</div></div>
@@ -1445,7 +1599,7 @@ async function saveAppData() {
 // helpers repaint only the parts whose data actually changed.
 
 function activeViewName() {
-  return ['home','cal','weather','seasons'].find(v => byId(v+'View')?.classList.contains('active')) || 'home';
+  return ['home','cal','forecast','weather','seasons'].find(v => byId(v+'View')?.classList.contains('active')) || 'home';
 }
 
 /** Repaint the current view in place. */
@@ -1453,6 +1607,7 @@ function renderCurrentView() {
   switch (activeViewName()) {
     case 'home':    renderHome(); break;
     case 'cal':     renderMonth(); break;
+    case 'forecast': renderForecast(); break;
     case 'weather': renderRegions(); break;
     case 'seasons': renderSeasons(); break;
   }
@@ -1473,6 +1628,7 @@ function refreshDateViews() {
   syncNavUI();
   renderHome();
   renderMonth();
+  renderForecast();          // its title and weather are the current day
   if (selectedDay) renderDayDetail();
 }
 
@@ -1491,6 +1647,7 @@ function softRefresh() {
 
   syncNavUI();
   syncRegionDropdown();
+  syncForecastRegionDropdown();
   renderHome();
   if (view === 'cal') {
     renderMonth();
@@ -1649,8 +1806,8 @@ function renderSeasons() {
     const varDisplay = s.tempVar || 5;
     const tempStr = s.baseTemp !== ''
       ? (isOffset
-          ? `${parseFloat(s.baseTemp) >= 0 ? '+' : ''}${s.baseTemp}°C offset ±${varDisplay}${formatTempUnit()}`
-          : `${formatTemp(s.baseTemp)} ±${varDisplay}${formatTempUnit()}`)
+          ? `${parseFloat(s.baseTemp) >= 0 ? '+' : ''}${formatTempDelta(s.baseTemp)} offset ± ${formatTempDelta(varDisplay)}`
+          : `${formatTemp(s.baseTemp)} ± ${formatTempDelta(varDisplay)}`)
       : 'Region default';
     const rainStr = s.rain !== ''
       ? (isOffset ? `${parseFloat(s.rain) >= 0 ? '+' : ''}${s.rain}% offset` : `${s.rain}%`)
@@ -1744,7 +1901,7 @@ function autoGenerateWeatherForDay(year, monthIdx, day) {
   const region = regions[0]||null;
   const w = autoWeatherForDay(year, monthIdx, day, region);
   selectedWeatherCond = w.condition;
-  byId('wTemp').value = w.temp;
+  byId('wTemp').value = tempToInput(w.temp);
   byId('wPrecip').value = w.precip;
   byId('wClouds').value = w.clouds;
   byId('wDesc').value = w.desc;
@@ -1760,19 +1917,90 @@ function toggleTheme() {
   if (btn) btn.textContent = newTheme === 'dark' ? 'Light' : 'Dark';
 }
 
+const TEMP_UNIT_KEY = "tempUnit";
+
+// game.settings.set() is asynchronous, so the repaint that follows a toggle
+// could otherwise read the previous value back. The cache is authoritative
+// for this session; the setting is what survives a reload.
+let _tempUnitCache = null;
+
 function getTempUnit() {
-  return (window.calTempUnit === 'fahrenheit') ? 'F' : 'C';
+  if (_tempUnitCache) return _tempUnitCache;
+  try {
+    _tempUnitCache = game.settings.get(MODULE_ID, TEMP_UNIT_KEY) === 'fahrenheit' ? 'F' : 'C';
+  } catch (e) {
+    _tempUnitCache = 'C';
+  }
+  return _tempUnitCache;
 }
+
+/** Per-user display preference — it changes nothing about stored data,
+ *  which is always Celsius. */
+function toggleTempUnit() {
+  const next = getTempUnit() === 'C' ? 'fahrenheit' : 'celsius';
+  _tempUnitCache = next === 'fahrenheit' ? 'F' : 'C';
+  game.settings.set(MODULE_ID, TEMP_UNIT_KEY, next)
+    .catch(err => console.warn(`${MODULE_ID} | could not persist temperature unit`, err));
+  syncTempUnitButton();
+  refreshTempDisplays();
+}
+
+function syncTempUnitButton() {
+  const btn = byId('tempUnitBtn');
+  if (!btn) return;
+  const unit = getTempUnit();
+  btn.textContent = unit === 'F' ? '°F' : '°C';
+  btn.title = unit === 'F'
+    ? 'Showing Fahrenheit — click for Celsius'
+    : 'Showing Celsius — click for Fahrenheit';
+}
+
+/** Temperatures appear on the grid, the day panel, the forecast, the
+ *  region cards and the season cards, so repaint whatever is on screen. */
+function refreshTempDisplays() {
+  if (!game.annwnCalendar?.rendered) return;
+  renderCurrentView();
+  if (activeViewName() === 'cal' && selectedDay) renderDayDetail();
+}
+
 function toFahrenheit(c) {
   return Math.round(parseFloat(c) * 9 / 5 + 32);
 }
+function fromFahrenheit(f) {
+  return Math.round((parseFloat(f) - 32) * 5 / 9);
+}
+
+/** An absolute temperature, in the viewer's unit. */
 function formatTemp(t) {
   if(t === '' || t === undefined || t === null) return '—';
   if(getTempUnit() === 'F') return `${toFahrenheit(t)}°F`;
   return `${t}°C`;
 }
+
+/** A temperature *difference* (a ± variance or a season offset). These
+ *  scale by 9/5 but must not pick up the +32 origin shift — converting
+ *  "±5°C" with the absolute formula would wrongly read as ±41°F. */
+function formatTempDelta(t) {
+  if(t === '' || t === undefined || t === null) return '—';
+  const v = parseFloat(t);
+  if (Number.isNaN(v)) return '—';
+  if(getTempUnit() === 'F') return `${Math.round(v * 9 / 5)}°F`;
+  return `${v}°C`;
+}
+
 function formatTempUnit() {
   return getTempUnit() === 'F' ? '°F' : '°C';
+}
+
+/** Stored Celsius -> the number shown in an input box. */
+function tempToInput(c) {
+  if (c === '' || c === undefined || c === null) return '';
+  return getTempUnit() === 'F' ? toFahrenheit(c) : c;
+}
+/** The number typed into an input box -> stored Celsius. */
+function tempFromInput(v) {
+  if (v === '' || v === undefined || v === null) return undefined;
+  return getTempUnit() === 'F' ? fromFahrenheit(v) : parseFloat(v);
 }
 
 function showWeatherTip(event, id) {
@@ -1813,6 +2041,17 @@ Hooks.once("init", () => {
     config: false,
     type: Object,
     default: null // populated lazily by loadCalendarData()'s DEFAULT_CAL/DEFAULT_APP
+  });
+
+  // Display preference only, and per-user rather than per-world: the GM
+  // can read Celsius while a player reads Fahrenheit. Stored weather data
+  // is always Celsius regardless.
+  game.settings.register(MODULE_ID, TEMP_UNIT_KEY, {
+    name: "Temperature Unit",
+    scope: "client",
+    config: false,
+    type: String,
+    default: "celsius"
   });
 });
 
@@ -1869,7 +2108,9 @@ window.setSeasonTempMode = setSeasonTempMode;
 window.setSelectedDayAsToday = setSelectedDayAsToday;
 window.showWeatherTip = showWeatherTip;
 window.switchView = switchView;
-window.toggleImportant = toggleImportant;   // <- was missing: the star button's
+window.toggleImportant = toggleImportant;
+window.toggleTempUnit = toggleTempUnit;
+window.selectForecastRegion = selectForecastRegion;   // <- was missing: the star button's
                                             //    onclick had no global to call,
                                             //    so every click was a no-op.
 window.toggleTheme = toggleTheme;
