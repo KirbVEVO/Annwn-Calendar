@@ -17,15 +17,15 @@
     <div class="topbar">
       <span class="topbar-brand">⟡ ANNWN</span>
       <div class="nav-tabs">
-        <button class="nav-tab active" onclick="switchView('home')">⌂ Home</button>
-        <button class="nav-tab" onclick="switchView('cal')">📅 Calendar</button>
-        <button class="nav-tab" onclick="switchView('weather')">🌤 Weather Regions</button>
-        <button class="nav-tab" onclick="switchView('seasons')">🍂 Seasons</button>
+        <button class="nav-tab active" data-view="home" onclick="switchView('home')">⌂ Home</button>
+        <button class="nav-tab" data-view="cal" onclick="switchView('cal')">📅 Calendar</button>
+        <button class="nav-tab gm-only" data-view="weather" onclick="switchView('weather')">🌤 Weather Regions</button>
+        <button class="nav-tab gm-only" data-view="seasons" onclick="switchView('seasons')">🍂 Seasons</button>
       </div>
       <div class="topbar-right">
         <button class="btn-icon" onclick="toggleTheme()">Light</button>
-        <button class="btn-icon" onclick="openSetDateModal()">📍 Set Current Date</button>
-        <button class="btn-icon" onclick="advanceDay()" title="Advance the current in-game date by one day">⏭ Next Day</button>
+        <button class="btn-icon gm-only" onclick="openSetDateModal()">📍 Set Current Date</button>
+        <button class="btn-icon gm-only" onclick="advanceDay()" title="Advance the current in-game date by one day">⏭ Next Day</button>
         </div>
     </div>
 
@@ -38,7 +38,7 @@
           </div>
           <div class="today-actions">
             <button class="btn-sm" onclick="goToCurrentDate()">Go to Date →</button>
-            <button class="btn-sm" onclick="openSetDateModal()">Change Date</button>
+            <button class="btn-sm gm-only" onclick="openSetDateModal()">Change Date</button>
           </div>
         </div>
         <div class="home-grid">
@@ -77,7 +77,7 @@
             <input type="number" class="year-input-styled" id="yearInput" onchange="jumpYear(this.value)">
             <select class="select-styled" id="eraSelect" onchange="jumpYear(document.getElementById('yearInput').value)"></select>
             <button class="today-btn" onclick="goToCurrentDate()">TODAY</button>
-            <select class="select-styled" id="weatherRegionSelect" onchange="selectWeatherRegion(this.value)" title="Weather region" style="max-width:160px;"></select>
+            <select class="select-styled gm-only" id="weatherRegionSelect" onchange="selectWeatherRegion(this.value)" title="Weather region" style="max-width:160px;"></select>
           </div>
           <div class="cal-content">
             <div class="cal-grid-wrap" id="calGridWrap"></div>

@@ -462,4 +462,29 @@
 .season-temp-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:8px; }
 .season-temp-item label { font-size:0.78rem; color:var(--cream-dim); display:block; margin-bottom:4px; }
 .season-temp-item input { width:100%; }
+
+/* --- role gating -------------------------------------------------------
+ * The app root carries data-role="gm" or data-role="player" (set in
+ * _onRender). Anything marked .gm-only simply isn't shown to players.
+ * This is presentation only — every underlying handler re-checks isGM()
+ * before touching data, so unhiding these in devtools achieves nothing.
+ */
+:scope[data-role="player"] .gm-only { display: none !important; }
+
+/* --- event attribution -------------------------------------------------- */
+.event-byline {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 400;
+  font-style: italic;
+  color: var(--cream-dim);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 8px;
+  margin-left: 6px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.side-event-item .event-byline { margin-left: 0; margin-top: 4px; }
 }

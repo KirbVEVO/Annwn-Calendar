@@ -2,6 +2,52 @@
 const { ApplicationV2, HandlebarsApplicationMixin } = foundry.applications.api;
 const MODULE_ID = "Annwn-Calendar";
 const SETTING_KEY = "calendarData";
+const SOCKET_NAME = `module.${MODULE_ID}`;
+
+// --- helpers ----------------------------------------------------------
+
+/** The app's own DOM subtree. All lookups are scoped here so this module
+ *  can never accidentally grab an element belonging to another Foundry
+ *  application that happens to share an id. */
+function appRoot() {
+  const root = game.annwnCalendar?.element?.querySelector?.('.annwn-calendar-root');
+  return root || document;
+}
+function byId(id) {
+  return appRoot().querySelector(`#${CSS.escape(id)}`) || document.getElementById(id);
+}
+function qsa(sel) {
+  return Array.from(appRoot().querySelectorAll(sel));
+}
+
+function isGM() { return !!game.user?.isGM; }
+
+/** The single GM responsible for writing player-submitted changes. */
+function activeGMUser() {
+  return game.users.activeGM ?? game.users.find(u => u.isGM && u.active) ?? null;
+}
+function isPrimaryGM() {
+  const gm = activeGMUser();
+  return !!gm && gm.id === game.user.id;
+}
+
+/** Guard for anything only a GM may do. Returns true if allowed. */
+function requireGM(what = "do that") {
+  if (isGM()) return true;
+  ui.notifications.warn(`Only the Game Master can ${what}.`);
+  return false;
+}
+
+/** Event names, locations and descriptions are now written by players, so
+ *  everything user-supplied is escaped before it reaches innerHTML. */
+function escapeHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+function escapeMultiline(str) {
+  return escapeHtml(str).replace(/\n/g, '<br>');
+}
 
 class AnnwnCalendarApp extends HandlebarsApplicationMixin(ApplicationV2) {
   static DEFAULT_OPTIONS = {
@@ -26,7 +72,13 @@ class AnnwnCalendarApp extends HandlebarsApplicationMixin(ApplicationV2) {
     // itself. Setting data-theme on this.element doesn't match
     // :scope[data-theme="dark"] in the CSS — this was the actual bug
     // behind "light/dark mode doesn't work."
-    this.element.querySelector('.annwn-calendar-root').dataset.theme = "dark";
+    const root = this.element.querySelector('.annwn-calendar-root');
+    root.dataset.theme = "dark";
+
+    // Drives the `.gm-only` CSS rule. Players never get the markup for
+    // GM controls painted at all, and every handler behind those controls
+    // re-checks isGM() anyway — the CSS is convenience, not the guard.
+    root.dataset.role = game.user.isGM ? "gm" : "player";
 
     // These two listeners were module-top-level in the original standalone
     // page (the DOM already existed when that <script> ran). Here they have
@@ -34,6 +86,10 @@ class AnnwnCalendarApp extends HandlebarsApplicationMixin(ApplicationV2) {
     // element, since Foundry creates/destroys this DOM on each render.
     const fileInput = this.element.querySelector('#fileInput');
     const uploadZone = this.element.querySelector('#uploadZone');
+    if (!game.user.isGM) {
+      // Importing overwrites the shared world calendar outright.
+      this.element.querySelector('#landing')?.remove();
+    }
     fileInput?.addEventListener('change', e => {
       const f = e.target.files[0]; if (!f) return;
       fileHandle = null;
@@ -218,14 +274,21 @@ function launchApp() {
   switchView('home');
 }
 
+const GM_ONLY_VIEWS = ['weather','seasons'];
+
 function switchView(v) {
+  if (GM_ONLY_VIEWS.includes(v) && !isGM()) {
+    ui.notifications.warn("Only the Game Master can open that tab.");
+    return;
+  }
+
   ['home','cal','weather','seasons'].forEach(id => {
-    const el = document.getElementById(id+'View');
-    el.classList.toggle('active', id===v);
+    byId(id+'View')?.classList.toggle('active', id===v);
   });
-  document.querySelectorAll('.nav-tab').forEach((t,i) => {
-    t.classList.toggle('active', ['home','cal','weather','seasons'][i]===v);
-  });
+  // Keyed off the tab's own data-view rather than its index, since the
+  // GM-only tabs aren't in the DOM for players and the indexes shift.
+  qsa('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.view === v));
+
   if(v==='home') renderHome();
   if(v==='cal') renderMonth();
   if(v==='weather') renderRegions();
@@ -233,11 +296,16 @@ function switchView(v) {
 }
 
 function renderHome() {
-  const appData = appData;
+  // NOTE: this function used to open with `const appData = appData;`, which
+  // is a temporal-dead-zone ReferenceError — the local `appData` shadowed the
+  // module-level one and threw the instant the function was entered. Every
+  // home panel, including the current date, was therefore never written.
+  const todayEl = byId('homeTodayDate');
+  if (!todayEl) return;
 
   const todayStr = formatDate(currentGameDate.year, currentGameDate.month, currentGameDate.day);
-  document.getElementById('homeTodayDate').textContent = todayStr;
-  document.getElementById('homeTodayWeekday').textContent = getWeekdayName(currentGameDate.year, currentGameDate.month, currentGameDate.day) + ' — In-Game Date';
+  todayEl.textContent = todayStr;
+  byId('homeTodayWeekday').textContent = getWeekdayName(currentGameDate.year, currentGameDate.month, currentGameDate.day) + ' — In-Game Date';
 
   const allEvents = getEffectiveEvents();
   const nowAbs = toAbsDay(currentGameDate.year, currentGameDate.month, currentGameDate.day);
@@ -248,18 +316,39 @@ function renderHome() {
   }).sort((a,b) => toAbsDay(a.year,a.month,a.day) - toAbsDay(b.year,b.month,b.day)).slice(0,8);
   renderHomeList('homeUpcoming', upcoming, nowAbs);
 
-  const important = allEvents.filter(e => e.important).sort((a,b) => toAbsDay(a.year,a.month,a.day) - toAbsDay(b.year,b.month,b.day)).slice(0,6);
+  // A yearly "important" event is expanded into one occurrence per year by
+  // getEffectiveEvents(), so these panels dedupe back down to one row per
+  // real event — the occurrence closest to the current date.
+  const important = nearestPerEvent(allEvents.filter(e => e.important), nowAbs)
+    .sort((a,b) => toAbsDay(a.year,a.month,a.day) - toAbsDay(b.year,b.month,b.day)).slice(0,6);
   renderHomeList('homeImportant', important, nowAbs);
 
-  const bdays = allEvents.filter(e => e.category === 'birthday' && e.month === currentGameDate.month);
+  const bdays = nearestPerEvent(
+    allEvents.filter(e => e.category === 'birthday' && e.month === currentGameDate.month), nowAbs
+  ).sort((a,b) => a.day - b.day);
   renderHomeList('homeBirthdays', bdays, nowAbs);
 
-  const recur = appData.events.filter(e => e.recur && e.recur !== 'none' && e.month === currentGameDate.month);
+  const recur = nearestPerEvent(
+    allEvents.filter(e => e.recur && e.recur !== 'none' && e.month === currentGameDate.month), nowAbs
+  ).sort((a,b) => a.day - b.day);
   renderHomeList('homeRecurring', recur, nowAbs);
 }
 
+/** Collapse expanded recurrence occurrences to one row per underlying event,
+ *  keeping whichever occurrence sits closest to the current in-game day. */
+function nearestPerEvent(events, nowAbs) {
+  const best = new Map();
+  for (const e of events) {
+    const key = e._baseId || e.id;
+    const dist = Math.abs(toAbsDay(e.year, e.month, e.day) - nowAbs);
+    const prev = best.get(key);
+    if (!prev || dist < prev.dist) best.set(key, { ev: e, dist });
+  }
+  return Array.from(best.values()).map(x => x.ev);
+}
+
 function renderHomeList(containerId, events, nowAbs) {
-  const el = document.getElementById(containerId);
+  const el = byId(containerId);
   if (!events.length) { el.innerHTML = '<div class="no-events">None found.</div>'; return; }
   el.innerHTML = events.map(e => {
     const d = toAbsDay(e.year, e.month, e.day);
@@ -269,8 +358,8 @@ function renderHomeList(containerId, events, nowAbs) {
     return `<div class="event-row" onclick="jumpToDate(${e.year},${e.month},${e.day})">
       <div class="event-color-bar" style="background:${e.color||'var(--gold)'}"></div>
       <div class="event-row-info">
-        <h4>${e.name}</h4>
-        <div class="meta">${formatDate(e.year,e.month,e.day)}${e.location?' · 📍 '+e.location:''} ${catTag}</div>
+        <h4>${escapeHtml(e.name)} ${attributionTag(e)}</h4>
+        <div class="meta">${formatDate(e.year,e.month,e.day)}${e.location?' · 📍 '+escapeHtml(e.location):''} ${catTag}</div>
         <div class="tracker">${tracker}</div>
       </div>
       <div class="countdown-badge">${tracker}</div>
@@ -482,7 +571,7 @@ function renderMonth() {
         else spanClass = 'span-mid';
       }
       const showName = absDay === eStart || d === 1;
-      return `<div class="day-event-chip ${spanClass}" style="background:${e.color||'#7a6430'}">${showName ? e.name : '&nbsp;'}</div>`;
+      return `<div class="day-event-chip ${spanClass}" style="background:${e.color||'#7a6430'}" title="${escapeHtml(e.name)}">${showName ? escapeHtml(e.name) : '&nbsp;'}</div>`;
     }).join('');
 
     const moonPips = moons.map(moon => {
@@ -506,7 +595,7 @@ function renderMonth() {
   }
   html += '</div>';
 
-  document.getElementById('calGridWrap').innerHTML = html;
+  byId('calGridWrap').innerHTML = html;
   if(selectedDay) renderDayDetail();
 }
 
@@ -517,7 +606,7 @@ function clickDay(d) {
 }
 
 function renderDayDetail() {
-  const panel = document.getElementById('dayDetail');
+  const panel = byId('dayDetail');
   panel.classList.add('open');
   const month = cal.months[currentMonthIdx];
   const era = getEraAbbr(currentYear);
@@ -532,26 +621,33 @@ function renderDayDetail() {
     const tracker = diff > 0 ? `⏳ In ${formatRelative(diff)}` : diff < 0 ? `⌛ ${formatRelative(-diff)} ago` : '⚡ Today';
     const timeStr = (e.startH!==undefined && e.startH!=='') ? `${pad(e.startH)}:${pad(e.startM||0)}${(e.endH!==undefined && e.endH!=='') ? ' – '+pad(e.endH)+':'+pad(e.endM||0) : ''}` : '';
     const recurStr = e.recur && e.recur!=='none' ? ` · 🔁 ${recurLabel(e.recur)}` : '';
+
+    // Recurrence occurrences carry synthetic ids like "abc123_r17942"; every
+    // button must act on the underlying stored event instead.
+    const baseId = e._baseId || e.id;
+    const delBtn = canDeleteEvent(e, game.user.id)
+      ? `<button class="del-btn" onclick="deleteEvent('${baseId}')" title="Delete event">✕</button>` : '';
+
     return `<div class="event-detail-item" style="border-left-color:${e.color||'var(--gold)'}">
       <div class="event-detail-header">
         <span class="tag ${e.category||'world'}">${categoryIcon(e.category)} ${e.category||'World'}</span>
-        <span class="event-detail-name">${e.name}</span>
-        <button class="star-btn ${e.important?'lit':''}" onclick="toggleImportant('${e.id}')">★</button>
-        <button class="edit-btn" onclick="openEditEvent('${e.id}')">✎</button>
-        <button class="del-btn" onclick="deleteEvent('${e.id}')">✕</button>
+        <span class="event-detail-name">${escapeHtml(e.name)} ${attributionTag(e)}</span>
+        <button class="star-btn ${e.important?'lit':''}" onclick="toggleImportant('${baseId}')" title="Mark as important">★</button>
+        <button class="edit-btn" onclick="openEditEvent('${baseId}')" title="Edit event">✎</button>
+        ${delBtn}
       </div>
       <div class="event-detail-meta">
         ${timeStr ? `<span>🕐 ${timeStr}</span>` : ''}
-        ${e.location ? `<span>📍 ${e.location}</span>` : ''}
+        ${e.location ? `<span>📍 ${escapeHtml(e.location)}</span>` : ''}
         ${recurStr}
       </div>
-      ${e.description ? `<div class="event-detail-desc">${e.description}</div>` : ''}
+      ${e.description ? `<div class="event-detail-desc">${escapeMultiline(e.description)}</div>` : ''}
       <div class="event-detail-tracker">${tracker}</div>
     </div>`;
   }).join('') : '<div class="no-events">No events this day.</div>';
 
-  const weatherBtn = `<button class="btn-sm" onclick="openWeatherModal(${selectedDay})">🌤 Set Weather</button>`;
-  const setTodayBtn = `<button class="btn-sm" onclick="setSelectedDayAsToday()" title="Set this day as the current in-game date">📍 Set to Today</button>`;
+  const weatherBtn = isGM() ? `<button class="btn-sm" onclick="openWeatherModal(${selectedDay})">🌤 Set Weather</button>` : '';
+  const setTodayBtn = isGM() ? `<button class="btn-sm" onclick="setSelectedDayAsToday()" title="Set this day as the current in-game date">📍 Set to Today</button>` : '';
   let weatherDisplay = '';
   if(weather) {
     const wc = WEATHER_CONDITIONS.find(w=>w.id===weather.condition);
@@ -581,18 +677,26 @@ function renderDayDetail() {
 }
 
 function renderSidebar() {
-  const q = (document.getElementById('sideSearch').value||'').toLowerCase();
-  const el = document.getElementById('sideEventList');
-  const evs = getEffectiveEvents().filter(e => e.important || q);
-  const filtered = q ? getEffectiveEvents().filter(e => e.name.toLowerCase().includes(q) || (e.description||'').toLowerCase().includes(q)) :
-    getEffectiveEvents().filter(e => e.important);
+  const searchEl = byId('sideSearch');
+  const el = byId('sideEventList');
+  if (!el) return;
+  const q = (searchEl?.value || '').toLowerCase();
+
+  const all = getEffectiveEvents();
+  const nowAbs = toAbsDay(currentGameDate.year, currentGameDate.month, currentGameDate.day);
+  const filtered = nearestPerEvent(
+    q ? all.filter(e => e.name.toLowerCase().includes(q) || (e.description||'').toLowerCase().includes(q))
+      : all.filter(e => e.important),
+    nowAbs
+  );
 
   if(!filtered.length) { el.innerHTML = '<div style="color:var(--text-dim);font-size:0.8rem;padding:8px;">No events found.</div>'; return; }
   el.innerHTML = filtered.sort((a,b)=>toAbsDay(a.year,a.month,a.day)-toAbsDay(b.year,b.month,b.day)).map(e => {
     const cc = e.color || 'var(--gold)';
     return `<div class="side-event-item" style="border-left-color:${cc}" onclick="jumpToDate(${e.year},${e.month},${e.day})">
-      <h5>${e.name}</h5>
-      <p>${formatDate(e.year,e.month,e.day)}${e.location?' · 📍'+e.location:''}</p>
+      <h5>${escapeHtml(e.name)}</h5>
+      <p>${formatDate(e.year,e.month,e.day)}${e.location?' · 📍'+escapeHtml(e.location):''}</p>
+      ${attributionTag(e)}
     </div>`;
   }).join('');
 }
@@ -600,99 +704,204 @@ function renderSidebar() {
 function openNewEvent() {
   if(!selectedDay) return;
   resetEventModal();
-  document.getElementById('eventModalTitle').textContent = `New Event — ${cal.months[currentMonthIdx].name} ${selectedDay}`;
-  document.getElementById('eventModal').classList.add('open');
+  byId('eventModalTitle').textContent = `New Event — ${cal.months[currentMonthIdx].name} ${selectedDay}`;
+  byId('eventModal').classList.add('open');
 }
 
 function openEditEvent(id) {
-  const ev = appData.events.find(e => e.id===id);
+  const ev = findEvent(id);
   if(!ev) return;
   resetEventModal();
-  document.getElementById('eventModalTitle').textContent = 'Edit Event';
-  document.getElementById('editingEvId').value = id;
-  document.getElementById('evName').value = ev.name;
-  document.getElementById('evDesc').value = ev.description||'';
-  document.getElementById('evCategory').value = ev.category||'world';
-  document.getElementById('evLocation').value = ev.location||'';
-  document.getElementById('evStartH').value = ev.startH!==undefined ? ev.startH : '';
-  document.getElementById('evStartM').value = ev.startM!==undefined ? ev.startM : '';
-  document.getElementById('evEndH').value = ev.endH!==undefined ? ev.endH : '';
-  document.getElementById('evEndM').value = ev.endM!==undefined ? ev.endM : '';
+  byId('eventModalTitle').textContent = ev.recur && ev.recur !== 'none'
+    ? 'Edit Event (applies to the whole series)'
+    : 'Edit Event';
+  byId('editingEvId').value = ev.id;
+  byId('evName').value = ev.name;
+  byId('evDesc').value = ev.description||'';
+  byId('evCategory').value = ev.category||'world';
+  byId('evLocation').value = ev.location||'';
+  byId('evStartH').value = ev.startH!==undefined ? ev.startH : '';
+  byId('evStartM').value = ev.startM!==undefined ? ev.startM : '';
+  byId('evEndH').value = ev.endH!==undefined ? ev.endH : '';
+  byId('evEndM').value = ev.endM!==undefined ? ev.endM : '';
   selectedColor = ev.color || '#c9a84c';
-  document.getElementById('colorSwatch').style.background = selectedColor;
-  document.getElementById('colorPicker').value = selectedColor;
+  byId('colorSwatch').style.background = selectedColor;
+  byId('colorPicker').value = selectedColor;
   selectedRecur = ev.recur || 'none';
-  document.querySelectorAll('.recur-chip').forEach(c => c.classList.toggle('active', c.dataset.recur===selectedRecur));
-  document.getElementById('evImportant').checked = !!ev.important;
-  document.getElementById('evDuration').value = (ev.duration && ev.duration > 1) ? ev.duration : '';
-  document.getElementById('eventModal').classList.add('open');
+  qsa('.recur-chip').forEach(c => c.classList.toggle('active', c.dataset.recur===selectedRecur));
+  byId('evImportant').checked = !!ev.important;
+  byId('evDuration').value = (ev.duration && ev.duration > 1) ? ev.duration : '';
+  byId('eventModal').classList.add('open');
 }
 
 function resetEventModal() {
-  document.getElementById('editingEvId').value = '';
-  document.getElementById('evName').value = '';
-  document.getElementById('evDesc').value = '';
-  document.getElementById('evCategory').value = 'world';
-  document.getElementById('evLocation').value = '';
-  document.getElementById('evStartH').value = '';
-  document.getElementById('evStartM').value = '';
-  document.getElementById('evEndH').value = '';
-  document.getElementById('evEndM').value = '';
+  byId('editingEvId').value = '';
+  byId('evName').value = '';
+  byId('evDesc').value = '';
+  byId('evCategory').value = 'world';
+  byId('evLocation').value = '';
+  byId('evStartH').value = '';
+  byId('evStartM').value = '';
+  byId('evEndH').value = '';
+  byId('evEndM').value = '';
   selectedColor = '#c9a84c';
   selectedRecur = 'none';
-  document.getElementById('colorSwatch').style.background = selectedColor;
-  document.getElementById('colorPicker').value = selectedColor;
-  document.querySelectorAll('.recur-chip').forEach(c => c.classList.toggle('active', c.dataset.recur==='none'));
-  document.getElementById('evImportant').checked = false;
-  document.getElementById('evDuration').value = '';
+  byId('colorSwatch').style.background = selectedColor;
+  byId('colorPicker').value = selectedColor;
+  qsa('.recur-chip').forEach(c => c.classList.toggle('active', c.dataset.recur==='none'));
+  byId('evImportant').checked = false;
+  byId('evDuration').value = '';
 }
 
-function closeEventModal() { document.getElementById('eventModal').classList.remove('open'); }
+function closeEventModal() { byId('eventModal').classList.remove('open'); }
+
+// --- event writes -----------------------------------------------------
+// Events are the one thing players may change. World-scoped settings can
+// only be written by a GM (Foundry enforces that server-side), so a
+// player's change is emitted over a socket and applied by the GM's client,
+// which then saves. The resulting setting update propagates back to
+// everyone and each client soft-refreshes.
+
+/** Recurrence occurrences get synthetic ids ("abc_r17942", "abc_m534_7").
+ *  Map any id back to the stored event it came from. */
+function resolveBaseId(id) {
+  const evs = appData.events || [];
+  if (evs.some(e => e.id === id)) return id;
+  const m = String(id).match(/^(.*)_(?:r-?\d+|m-?\d+_\d+)$/);
+  return m ? m[1] : id;
+}
+function findEvent(id) {
+  return (appData.events || []).find(e => e.id === resolveBaseId(id)) || null;
+}
+
+/** Players may add and edit, but only delete what they added themselves. */
+function canDeleteEvent(ev, userId) {
+  const user = game.users.get(userId);
+  if (!user) return false;
+  if (user.isGM) return true;
+  return !!ev && ev.createdBy === userId;
+}
+
+/** Mutates appData.events. Runs on whichever client actually owns the
+ *  write — the acting user for a GM, the GM's client for a player. */
+function applyEventOp(op, userId) {
+  const user = game.users.get(userId);
+  if (!user) return false;
+  if (!appData.events) appData.events = [];
+  const evs = appData.events;
+  const stamp = { updatedBy: userId, updatedByName: user.name, updatedAt: Date.now() };
+
+  if (op.action === 'create') {
+    evs.push({
+      id: uid(),
+      ...op.data,
+      createdBy: userId, createdByName: user.name, createdAt: Date.now(),
+      ...stamp
+    });
+    return true;
+  }
+
+  const idx = evs.findIndex(e => e.id === op.id);
+  if (idx < 0) return false;
+
+  switch (op.action) {
+    case 'update':
+      Object.assign(evs[idx], op.data, stamp);
+      return true;
+    case 'toggleImportant':
+      evs[idx].important = !evs[idx].important;
+      Object.assign(evs[idx], stamp);
+      return true;
+    case 'delete':
+      if (!canDeleteEvent(evs[idx], userId)) return false;
+      evs.splice(idx, 1);
+      return true;
+  }
+  return false;
+}
+
+/** Entry point for every event change made through the UI. */
+async function submitEventOp(op) {
+  if (isGM()) {
+    if (!applyEventOp(op, game.user.id)) return false;
+    await saveAppData();
+    refreshEventViews();
+    return true;
+  }
+
+  if (!activeGMUser()) {
+    ui.notifications.error("No Game Master is online, so calendar changes can't be saved right now.");
+    return false;
+  }
+  game.socket.emit(SOCKET_NAME, { type: "eventOp", op, userId: game.user.id });
+  return true;
+}
+
+/** GM side of the socket. Exactly one GM performs the write so two
+ *  connected GMs don't both apply the same change. */
+function onCalendarSocket(data) {
+  if (data?.type !== "eventOp") return;
+  if (!isPrimaryGM()) return;
+  if (!applyEventOp(data.op, data.userId)) return;
+  saveAppData().then(() => refreshEventViews());
+}
 
 function saveEvent() {
-  const name = document.getElementById('evName').value.trim();
-  if(!name) { alert("Please enter an event name."); return; }
-  const editId = document.getElementById('editingEvId').value;
-  const cat = document.getElementById('evCategory').value;
+  const name = byId('evName').value.trim();
+  if(!name) { ui.notifications.warn("Please enter an event name."); return; }
+  const editId = byId('editingEvId').value;
 
   const evData = {
     name,
-    description: document.getElementById('evDesc').value,
-    category: cat,
-    location: document.getElementById('evLocation').value,
-    startH: document.getElementById('evStartH').value,
-    startM: document.getElementById('evStartM').value,
-    endH: document.getElementById('evEndH').value,
-    endM: document.getElementById('evEndM').value,
+    description: byId('evDesc').value,
+    category: byId('evCategory').value,
+    location: byId('evLocation').value,
+    startH: byId('evStartH').value,
+    startM: byId('evStartM').value,
+    endH: byId('evEndH').value,
+    endM: byId('evEndM').value,
     color: selectedColor,
     recur: selectedRecur,
-    important: document.getElementById('evImportant').checked,
-    duration: Math.max(1, parseInt(document.getElementById('evDuration').value)||1),
-    year: currentYear, month: currentMonthIdx, day: selectedDay,
+    important: byId('evImportant').checked,
+    duration: Math.max(1, parseInt(byId('evDuration').value)||1),
   };
 
-  const evs = appData.events;
-  if(editId) {
-    const idx = evs.findIndex(e=>e.id===editId);
-    if(idx>=0) Object.assign(evs[idx], evData);
+  if (editId) {
+    // The modal has no date fields, so an edit must never move the event.
+    // Previously it was stamped with whatever day the panel was open on,
+    // which silently relocated any recurring event edited from one of its
+    // repeat occurrences.
+    submitEventOp({ action: 'update', id: resolveBaseId(editId), data: evData });
   } else {
-    evs.push({ id: uid(), ...evData });
+    if (selectedDay === null || selectedDay === undefined) return;
+    submitEventOp({ action: 'create', data: {
+      ...evData, year: currentYear, month: currentMonthIdx, day: selectedDay
+    }});
   }
   closeEventModal();
-  saveAppData();
-  renderMonth();
-  renderSidebar();
 }
 
 function toggleImportant(id) {
-  const ev = appData.events.find(e=>e.id===id);
-  if(ev) { ev.important = !ev.important; saveAppData(); renderDayDetail(); renderSidebar(); }
+  const ev = findEvent(id);
+  if (!ev) return;
+
+  // Repaint the star immediately so the click feels responsive; the
+  // authoritative state arrives with the save/broadcast a moment later.
+  const btn = appRoot().querySelector?.(`.star-btn[onclick*="${CSS.escape(id)}"]`);
+  if (btn) btn.classList.toggle('lit', !ev.important);
+
+  submitEventOp({ action: 'toggleImportant', id: ev.id });
 }
 
 function deleteEvent(id) {
+  const ev = findEvent(id);
+  if (!ev) return;
+  if (!canDeleteEvent(ev, game.user.id)) {
+    ui.notifications.warn("You can only delete events you added yourself.");
+    return;
+  }
   if(!confirm("Delete this event permanently?")) return;
-  appData.events = appData.events.filter(e=>e.id!==id);
-  saveAppData(); renderMonth(); renderDayDetail(); renderSidebar();
+  submitEventOp({ action: 'delete', id: ev.id });
 }
 
 function getEffectiveEvents() {
@@ -704,7 +913,7 @@ function getEffectiveEvents() {
   cal.months.forEach((m,i)=>{ monthStarts.push(acc); acc+=m.length; });
 
   evs.forEach(ev => {
-    result.push({...ev});
+    result.push({...ev, _baseId: ev.id});
     if(!ev.recur || ev.recur==='none') return;
 
     const baseAbs = toAbsDay(ev.year, ev.month, ev.day);
@@ -725,7 +934,7 @@ function getEffectiveEvents() {
       while(cur <= rangeEnd) {
         if(cur >= rangeStart) {
           const dateObj = fromAbsDay(cur);
-          if(dateObj) result.push({...ev, year:dateObj.year, month:dateObj.month, day:dateObj.day, id: ev.id+'_r'+cur, _recurring:true});
+          if(dateObj) result.push({...ev, year:dateObj.year, month:dateObj.month, day:dateObj.day, id: ev.id+'_r'+cur, _baseId: ev.id, _recurring:true});
         }
         cur += step;
         if(cur - baseAbs > 36500*10) break;
@@ -738,7 +947,7 @@ function getEffectiveEvents() {
           if(ev.day <= cal.months[mo].length) {
             const a = toAbsDay(yr,mo,ev.day);
             if(a >= rangeStart && a <= rangeEnd) {
-              result.push({...ev, year:yr, month:mo, day:ev.day, id: ev.id+'_m'+yr+'_'+mo, _recurring:true});
+              result.push({...ev, year:yr, month:mo, day:ev.day, id: ev.id+'_m'+yr+'_'+mo, _baseId: ev.id, _recurring:true});
             }
           }
         }
@@ -749,35 +958,36 @@ function getEffectiveEvents() {
 }
 
 function openWeatherModal(day) {
+  if (!requireGM("set the weather")) return;
   weatherDay = day;
   const m = cal.months[currentMonthIdx];
   const era = getEraAbbr(currentYear);
-  document.getElementById('weatherDateLabel').textContent = `${m.name} ${day}, ${Math.abs(currentYear)} ${era}`;
+  byId('weatherDateLabel').textContent = `${m.name} ${day}, ${Math.abs(currentYear)} ${era}`;
 
   const existing = (appData.weather||{})[weatherKey(currentYear,currentMonthIdx,day)];
   if(existing) {
     selectedWeatherCond = existing.condition;
-    document.getElementById('wTemp').value = existing.temp!==undefined ? existing.temp : '';
-    document.getElementById('wDesc').value = existing.desc||'';
-    document.getElementById('wPrecip').value = existing.precip!==undefined ? existing.precip : '';
-    document.getElementById('wClouds').value = existing.clouds!==undefined ? existing.clouds : '';
+    byId('wTemp').value = existing.temp!==undefined ? existing.temp : '';
+    byId('wDesc').value = existing.desc||'';
+    byId('wPrecip').value = existing.precip!==undefined ? existing.precip : '';
+    byId('wClouds').value = existing.clouds!==undefined ? existing.clouds : '';
   } else {
     selectedWeatherCond = 'sunny';
-    document.getElementById('wTemp').value = '';
-    document.getElementById('wDesc').value = '';
-    document.getElementById('wPrecip').value = '';
-    document.getElementById('wClouds').value = '';
+    byId('wTemp').value = '';
+    byId('wDesc').value = '';
+    byId('wPrecip').value = '';
+    byId('wClouds').value = '';
   }
 
   buildWeatherCondGrid();
   buildRegionSelect('wRegion', existing?.region||'');
-  document.getElementById('weatherModal').classList.add('open');
+  byId('weatherModal').classList.add('open');
 }
 
-function closeWeatherModal() { document.getElementById('weatherModal').classList.remove('open'); }
+function closeWeatherModal() { byId('weatherModal').classList.remove('open'); }
 
 function buildWeatherCondGrid() {
-  const el = document.getElementById('weatherCondGrid');
+  const el = byId('weatherCondGrid');
   if(!el) return;
   el.innerHTML = WEATHER_CONDITIONS.map(w =>
     `<div class="weather-option ${selectedWeatherCond===w.id?'selected':''}" onclick="selectWeather('${w.id}')">
@@ -789,16 +999,17 @@ function buildWeatherCondGrid() {
 function selectWeather(id) { selectedWeatherCond = id; buildWeatherCondGrid(); }
 
 function saveWeather() {
+  if (!requireGM("set the weather")) return;
   if(!weatherDay) return;
   const key = weatherKey(currentYear,currentMonthIdx,weatherDay);
   if(!appData.weather) appData.weather = {};
   appData.weather[key] = {
     condition: selectedWeatherCond,
-    temp: document.getElementById('wTemp').value !== '' ? parseFloat(document.getElementById('wTemp').value) : undefined,
-    desc: document.getElementById('wDesc').value,
-    precip: document.getElementById('wPrecip').value !== '' ? parseFloat(document.getElementById('wPrecip').value) : undefined,
-    clouds: document.getElementById('wClouds').value !== '' ? parseFloat(document.getElementById('wClouds').value) : undefined,
-    region: document.getElementById('wRegion').value||undefined,
+    temp: byId('wTemp').value !== '' ? parseFloat(byId('wTemp').value) : undefined,
+    desc: byId('wDesc').value,
+    precip: byId('wPrecip').value !== '' ? parseFloat(byId('wPrecip').value) : undefined,
+    clouds: byId('wClouds').value !== '' ? parseFloat(byId('wClouds').value) : undefined,
+    region: byId('wRegion').value||undefined,
   };
   closeWeatherModal();
   saveAppData();
@@ -807,7 +1018,8 @@ function saveWeather() {
 }
 
 function randomiseWeather() {
-  const regionId = document.getElementById('wRegion').value;
+  if (!requireGM("set the weather")) return;
+  const regionId = byId('wRegion').value;
   const region = (appData.regions||[]).find(r=>r.id===regionId);
 
   const season = weatherDay ? getSeasonForDay(currentYear, currentMonthIdx, weatherDay) : null;
@@ -825,36 +1037,38 @@ function randomiseWeather() {
   selectedWeatherCond = cond;
   const temp = Math.round(baseTemp + (Math.random()-0.5)*2*tempVar);
   if(temp < 0 && cond==='rain') cond = selectedWeatherCond = 'snow';
-  document.getElementById('wTemp').value = temp;
-  document.getElementById('wPrecip').value = cond==='rain'||cond==='storm'||cond==='snow' ? Math.round(40+Math.random()*60) : cond==='cloudy' ? Math.round(10+Math.random()*20) : Math.round(Math.random()*10);
-  document.getElementById('wClouds').value = cond==='sunny' ? Math.round(Math.random()*20) : cond==='cloudy' ? Math.round(50+Math.random()*40) : Math.round(70+Math.random()*30);
-  document.getElementById('wDesc').value = cinematicTemp(temp) + (season ? ' ' + season.name : '');
+  byId('wTemp').value = temp;
+  byId('wPrecip').value = cond==='rain'||cond==='storm'||cond==='snow' ? Math.round(40+Math.random()*60) : cond==='cloudy' ? Math.round(10+Math.random()*20) : Math.round(Math.random()*10);
+  byId('wClouds').value = cond==='sunny' ? Math.round(Math.random()*20) : cond==='cloudy' ? Math.round(50+Math.random()*40) : Math.round(70+Math.random()*30);
+  byId('wDesc').value = cinematicTemp(temp) + (season ? ' ' + season.name : '');
   buildWeatherCondGrid();
 }
 
 function openAddRegionModal() {
-  document.getElementById('rName').value = '';
-  document.getElementById('rBaseTemp').value = '';
-  document.getElementById('rRain').value = 30; document.getElementById('rRainV').textContent = '30%';
-  document.getElementById('rClouds').value = 40; document.getElementById('rCloudsV').textContent = '40%';
-  document.getElementById('rStorm').value = 10; document.getElementById('rStormV').textContent = '10%';
-  document.getElementById('rTempVar').value = 5; document.getElementById('rTempVarV').textContent = '±5°';
-  document.getElementById('editingRegionId').value = '';
-  document.getElementById('regionModal').classList.add('open');
+  if (!requireGM("manage weather regions")) return;
+  byId('rName').value = '';
+  byId('rBaseTemp').value = '';
+  byId('rRain').value = 30; byId('rRainV').textContent = '30%';
+  byId('rClouds').value = 40; byId('rCloudsV').textContent = '40%';
+  byId('rStorm').value = 10; byId('rStormV').textContent = '10%';
+  byId('rTempVar').value = 5; byId('rTempVarV').textContent = '±5°';
+  byId('editingRegionId').value = '';
+  byId('regionModal').classList.add('open');
 }
 
 function saveRegion() {
-  const name = document.getElementById('rName').value.trim();
+  if (!requireGM("manage weather regions")) return;
+  const name = byId('rName').value.trim();
   if(!name) return;
   if(!appData.regions) appData.regions = [];
-  const editId = document.getElementById('editingRegionId').value;
+  const editId = byId('editingRegionId').value;
   const regionData = {
     name,
-    baseTemp: parseFloat(document.getElementById('rBaseTemp').value)||15,
-    rain: parseInt(document.getElementById('rRain').value),
-    clouds: parseInt(document.getElementById('rClouds').value),
-    storm: parseInt(document.getElementById('rStorm').value),
-    tempVar: parseInt(document.getElementById('rTempVar').value),
+    baseTemp: parseFloat(byId('rBaseTemp').value)||15,
+    rain: parseInt(byId('rRain').value),
+    clouds: parseInt(byId('rClouds').value),
+    storm: parseInt(byId('rStorm').value),
+    tempVar: parseInt(byId('rTempVar').value),
   };
   if(editId) {
     const idx = appData.regions.findIndex(r=>r.id===editId);
@@ -862,12 +1076,13 @@ function saveRegion() {
   } else {
     appData.regions.push({ id: uid(), ...regionData });
   }
-  document.getElementById('regionModal').classList.remove('open');
+  byId('regionModal').classList.remove('open');
   saveAppData();
   renderRegions();
 }
 
 function deleteRegion(id) {
+  if (!requireGM("manage weather regions")) return;
   if(!confirm("Delete this region?")) return;
   appData.regions = appData.regions.filter(r=>r.id!==id);
   saveAppData(); renderRegions();
@@ -875,7 +1090,7 @@ function deleteRegion(id) {
 
 function renderRegions() {
   syncRegionDropdown();
-  const el = document.getElementById('regionList');
+  const el = byId('regionList');
   const regions = appData.regions||[];
   if(!regions.length) { el.innerHTML = '<div class="no-events" style="padding:24px;">No weather regions defined. Add one to configure regional weather randomisation.</div>'; return; }
   el.innerHTML = regions.map(r => `
@@ -898,20 +1113,21 @@ function renderRegions() {
 }
 
 function editRegion(id) {
+  if (!requireGM("manage weather regions")) return;
   const r = (appData.regions||[]).find(r=>r.id===id);
   if(!r) return;
-  document.getElementById('rName').value = r.name;
-  document.getElementById('rBaseTemp').value = r.baseTemp;
-  document.getElementById('rRain').value = r.rain; document.getElementById('rRainV').textContent = r.rain+'%';
-  document.getElementById('rClouds').value = r.clouds; document.getElementById('rCloudsV').textContent = r.clouds+'%';
-  document.getElementById('rStorm').value = r.storm; document.getElementById('rStormV').textContent = r.storm+'%';
-  document.getElementById('rTempVar').value = r.tempVar; document.getElementById('rTempVarV').textContent = '±'+r.tempVar+'°';
-  document.getElementById('editingRegionId').value = id;
-  document.getElementById('regionModal').classList.add('open');
+  byId('rName').value = r.name;
+  byId('rBaseTemp').value = r.baseTemp;
+  byId('rRain').value = r.rain; byId('rRainV').textContent = r.rain+'%';
+  byId('rClouds').value = r.clouds; byId('rCloudsV').textContent = r.clouds+'%';
+  byId('rStorm').value = r.storm; byId('rStormV').textContent = r.storm+'%';
+  byId('rTempVar').value = r.tempVar; byId('rTempVarV').textContent = '±'+r.tempVar+'°';
+  byId('editingRegionId').value = id;
+  byId('regionModal').classList.add('open');
 }
 
 function buildRegionSelect(selectId, selectedVal) {
-  const el = document.getElementById(selectId);
+  const el = byId(selectId);
   el.innerHTML = '<option value="">— No Region —</option>';
   (appData.regions||[]).forEach(r => {
     el.innerHTML += `<option value="${r.id}" ${r.id===selectedVal?'selected':''}>${r.name}</option>`;
@@ -919,7 +1135,7 @@ function buildRegionSelect(selectId, selectedVal) {
 }
 
 function syncRegionDropdown() {
-  const el = document.getElementById('weatherRegionSelect');
+  const el = byId('weatherRegionSelect');
   if(!el) return;
   const regions = appData.regions || [];
   if(!regions.length) {
@@ -941,51 +1157,64 @@ function syncRegionDropdown() {
 
 function selectWeatherRegion(id) {
   selectedWeatherRegionId = id || null;
-  if(document.getElementById('calView').classList.contains('active')) renderMonth();
+  if(byId('calView').classList.contains('active')) renderMonth();
 }
 
 function openSetDateModal() {
-  const sdMonth = document.getElementById('sdMonth');
+  if (!requireGM("change the current in-game date")) return;
+  const sdMonth = byId('sdMonth');
   sdMonth.innerHTML = cal.months.map((m,i)=>`<option value="${i}">${m.name}</option>`).join('');
   sdMonth.value = currentGameDate.month;
-  document.getElementById('sdDay').value = currentGameDate.day;
-  document.getElementById('sdYear').value = Math.abs(currentGameDate.year);
+  byId('sdDay').value = currentGameDate.day;
+  byId('sdYear').value = Math.abs(currentGameDate.year);
 
   const opts = [];
   if(cal.positiveEras) cal.positiveEras.forEach(e => opts.push(`<option value="pos">${e.abbr}</option>`));
   if(cal.negativeEra) opts.push(`<option value="neg">${cal.negativeEra.abbr}</option>`);
-  document.getElementById('sdEra').innerHTML = opts.join('');
-  document.getElementById('sdEra').value = currentGameDate.year >= 0 ? 'pos' : 'neg';
+  byId('sdEra').innerHTML = opts.join('');
+  byId('sdEra').value = currentGameDate.year >= 0 ? 'pos' : 'neg';
   previewCurrentDate();
-  document.getElementById('setDateModal').classList.add('open');
+  byId('setDateModal').classList.add('open');
 }
 
 function previewCurrentDate() {
-  const m = parseInt(document.getElementById('sdMonth').value);
-  const d = parseInt(document.getElementById('sdDay').value)||1;
-  const y = parseInt(document.getElementById('sdYear').value)||534;
-  const era = document.getElementById('sdEra').value;
+  const m = parseInt(byId('sdMonth').value);
+  const d = parseInt(byId('sdDay').value)||1;
+  const y = parseInt(byId('sdYear').value)||534;
+  const era = byId('sdEra').value;
   const absYear = era==='neg' ? -y : y;
-  document.getElementById('currentDatePreview').textContent = `${cal.months[m]?.name||''} ${d}, ${Math.abs(absYear)} ${getEraAbbr(absYear)}`;
+  byId('currentDatePreview').textContent = `${cal.months[m]?.name||''} ${d}, ${Math.abs(absYear)} ${getEraAbbr(absYear)}`;
 }
 
 function saveCurrentDate() {
-  const m = parseInt(document.getElementById('sdMonth').value);
-  const d = parseInt(document.getElementById('sdDay').value)||1;
-  const y = parseInt(document.getElementById('sdYear').value)||534;
-  const era = document.getElementById('sdEra').value;
+  if (!requireGM("change the current in-game date")) return;
+  const m = parseInt(byId('sdMonth').value);
+  const d = parseInt(byId('sdDay').value)||1;
+  const y = parseInt(byId('sdYear').value)||534;
+  const era = byId('sdEra').value;
+
+  const maxDay = cal.months[m]?.length || 30;
+  if (d < 1 || d > maxDay) {
+    ui.notifications.warn(`${cal.months[m]?.name || 'That month'} only has ${maxDay} days.`);
+    return;
+  }
+
   currentGameDate = { year: era==='neg'?-y:y, month:m, day:d };
   appData.currentDate = currentGameDate;
   currentMonthIdx = m;
   currentYear = currentGameDate.year;
-  document.getElementById('setDateModal').classList.remove('open');
+  byId('setDateModal').classList.remove('open');
   saveAppData();
-  syncNavUI();
-  renderMonth();
-  renderHome();
+  refreshDateViews();
 }
 
 function advanceDay() {
+  if (!requireGM("advance the in-game date")) return;
+
+  // Was the viewer looking at the month the date is leaving? If so the view
+  // follows the date along; if they were browsing some other month, they
+  // stay where they are rather than being yanked back.
+  const wasFollowing = (currentYear === currentGameDate.year && currentMonthIdx === currentGameDate.month);
 
   let { year, month, day } = currentGameDate;
   day++;
@@ -999,12 +1228,12 @@ function advanceDay() {
   }
   currentGameDate = { year, month, day };
   appData.currentDate = currentGameDate;
-  currentMonthIdx = month;
-  currentYear = year;
+  if (wasFollowing) {
+    currentMonthIdx = month;
+    currentYear = year;
+  }
   saveAppData();
-  syncNavUI();
-  renderMonth();
-  renderHome();
+  refreshDateViews();
 }
 
 function goToCurrentDate() {
@@ -1017,9 +1246,9 @@ function goToCurrentDate() {
 }
 
 function buildMonthSelect() {
-  const el = document.getElementById('monthSelect');
+  const el = byId('monthSelect');
   el.innerHTML = cal.months.map((m,i)=>`<option value="${i}">${m.name}</option>`).join('');
-  const sdEl = document.getElementById('sdMonth');
+  const sdEl = byId('sdMonth');
   if(sdEl) sdEl.innerHTML = cal.months.map((m,i)=>`<option value="${i}">${m.name}</option>`).join('');
 }
 
@@ -1028,17 +1257,17 @@ function buildEraSelect() {
   if(cal.positiveEras) cal.positiveEras.forEach(e => opts.push(`<option value="pos">${e.abbr}</option>`));
   if(cal.negativeEra) opts.push(`<option value="neg">${cal.negativeEra.abbr}</option>`);
   const html = opts.join('');
-  document.getElementById('eraSelect').innerHTML = html;
+  byId('eraSelect').innerHTML = html;
 
-  const sdEra = document.getElementById('sdEra');
+  const sdEra = byId('sdEra');
   if(sdEra) sdEra.innerHTML = html;
 }
 
 function syncNavUI() {
-  document.getElementById('monthSelect').value = currentMonthIdx;
-  document.getElementById('yearInput').value = Math.abs(currentYear);
-  document.getElementById('eraSelect').value = currentYear>=0 ? 'pos' : 'neg';
-  document.getElementById('calMonthTitle').textContent = `${cal.months[currentMonthIdx].name} ${Math.abs(currentYear)} ${getEraAbbr(currentYear)}`;
+  byId('monthSelect').value = currentMonthIdx;
+  byId('yearInput').value = Math.abs(currentYear);
+  byId('eraSelect').value = currentYear>=0 ? 'pos' : 'neg';
+  byId('calMonthTitle').textContent = `${cal.months[currentMonthIdx].name} ${Math.abs(currentYear)} ${getEraAbbr(currentYear)}`;
 }
 
 function changeMonth(step) {
@@ -1050,7 +1279,7 @@ function changeMonth(step) {
 
 function jumpMonth(idx) { currentMonthIdx=parseInt(idx); syncNavUI(); renderMonth(); }
 function jumpYear(v) {
-  const era = document.getElementById('eraSelect').value;
+  const era = byId('eraSelect').value;
   currentYear = era==='neg' ? -Math.abs(parseInt(v)||0) : Math.abs(parseInt(v)||0);
   syncNavUI(); renderMonth();
 }
@@ -1062,7 +1291,7 @@ function jumpToDate(y, m, d) {
 }
 
 function renderColorPresets() {
-  const el = document.getElementById('colorPresets');
+  const el = byId('colorPresets');
   el.innerHTML = PRESET_COLORS.map(c =>
     `<div class="color-preset" style="background:${c}" onclick="pickColor('${c}')"></div>`
   ).join('');
@@ -1070,18 +1299,18 @@ function renderColorPresets() {
 
 function pickColor(c) {
   selectedColor = c;
-  document.getElementById('colorSwatch').style.background = c;
-  document.getElementById('colorPicker').value = c;
+  byId('colorSwatch').style.background = c;
+  byId('colorPicker').value = c;
 }
 
 function updateSwatch(c) {
   selectedColor = c;
-  document.getElementById('colorSwatch').style.background = c;
+  byId('colorSwatch').style.background = c;
 }
 
 function selectRecur(el) {
   selectedRecur = el.dataset.recur;
-  document.querySelectorAll('.recur-chip').forEach(c => c.classList.toggle('active', c===el));
+  qsa('.recur-chip').forEach(c => c.classList.toggle('active', c===el));
 }
 
 function recurLabel(r) {
@@ -1141,6 +1370,34 @@ function categoryIcon(cat) {
   return map[cat]||'🌍';
 }
 
+/** Small "Added by X on DATE" credit shown beside an event's title.
+ *  Events created before this feature existed carry no author, so they
+ *  simply render no tag rather than claiming an author they never had. */
+function attributionTag(ev) {
+  const name = ev.createdByName || game.users.get(ev.createdBy)?.name;
+  if (!name) return '';
+
+  let out = `Added by ${escapeHtml(name)}`;
+  if (ev.createdAt) out += ` on ${formatRealDate(ev.createdAt)}`;
+
+  // Only worth showing the editor when it isn't the original author.
+  const editor = ev.updatedByName || game.users.get(ev.updatedBy)?.name;
+  const title = (editor && editor !== name && ev.updatedAt)
+    ? ` title="Last edited by ${escapeHtml(editor)} on ${formatRealDate(ev.updatedAt)}"`
+    : '';
+
+  return `<span class="event-byline"${title}>${out}</span>`;
+}
+
+/** Real-world (not in-game) timestamp, in the viewer's own locale. */
+function formatRealDate(ts) {
+  try {
+    return new Date(ts).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  } catch (e) {
+    return '';
+  }
+}
+
 function pad(n) { return String(n||0).padStart(2,'0'); }
 function uid() { return Math.random().toString(36).substr(2,9); }
 
@@ -1151,17 +1408,24 @@ function buildSavePayload() {
   };
 }
 
+// Stamped onto every write this client makes, so the updateSetting hook can
+// tell "someone else changed the calendar" from "I just saved". Without this
+// the hook re-rendered the whole ApplicationV2 on every local save, which is
+// what made setting the date visibly reload the entire window.
+let _lastLocalRev = null;
+
 async function saveAppData() {
   if (!game.user.isGM) {
     // World-scoped settings can only be written by a GM — Foundry enforces
-    // this server-side regardless of what the UI lets someone click.
-    // Player-writable event add/delete (via a separate, open-ownership
-    // document) is a follow-up piece, not yet wired in this pass.
-    ui.notifications.warn("Only the GM can save changes to the shared calendar right now.");
+    // this server-side. Players reach this path only via submitEventOp(),
+    // which routes their change through the GM's client instead.
+    ui.notifications.warn("Only the GM can save changes to the shared calendar.");
     return;
   }
 
-  await game.settings.set(MODULE_ID, SETTING_KEY, { cal, appData });
+  const rev = uid();
+  _lastLocalRev = rev;
+  await game.settings.set(MODULE_ID, SETTING_KEY, { cal, appData, _rev: rev });
   showSaveIndicator();
 
   if (!fileHandle) return;
@@ -1174,14 +1438,82 @@ async function saveAppData() {
   }
 }
 
+// --- targeted refreshes -----------------------------------------------
+// Nothing in here calls Application#render(). Re-rendering the whole app
+// tears down and rebuilds its DOM, which reruns _onRender -> launchApp ->
+// switchView('home') — that's the "the app refreshes" behaviour. These
+// helpers repaint only the parts whose data actually changed.
+
+function activeViewName() {
+  return ['home','cal','weather','seasons'].find(v => byId(v+'View')?.classList.contains('active')) || 'home';
+}
+
+/** Repaint the current view in place. */
+function renderCurrentView() {
+  switch (activeViewName()) {
+    case 'home':    renderHome(); break;
+    case 'cal':     renderMonth(); break;
+    case 'weather': renderRegions(); break;
+    case 'seasons': renderSeasons(); break;
+  }
+}
+
+/** After an event was added/edited/removed. */
+function refreshEventViews() {
+  if (!game.annwnCalendar?.rendered) return;
+  renderHome();
+  renderMonth();
+  if (selectedDay) renderDayDetail();
+}
+
+/** After the current in-game date moved. Updates the date read-outs and
+ *  the highlighted day without rebuilding the window. */
+function refreshDateViews() {
+  if (!game.annwnCalendar?.rendered) return;
+  syncNavUI();
+  renderHome();
+  renderMonth();
+  if (selectedDay) renderDayDetail();
+}
+
+/** Someone else changed the shared calendar. Reload the data but keep this
+ *  viewer exactly where they were — same tab, same month, same selected day. */
+function softRefresh() {
+  if (!game.annwnCalendar?.rendered) return;
+
+  const view = activeViewName();
+  const keep = { month: currentMonthIdx, year: currentYear, day: selectedDay };
+
+  loadCalendarData();            // resets the view position to the game date…
+  currentMonthIdx = keep.month;  // …so put the viewer's position back.
+  currentYear = keep.year;
+  selectedDay = keep.day;
+
+  syncNavUI();
+  syncRegionDropdown();
+  renderHome();
+  if (view === 'cal') {
+    renderMonth();
+    if (selectedDay) renderDayDetail();
+  } else {
+    renderCurrentView();
+  }
+}
+
 function showSaveIndicator() {
-  let ind = game.annwnCalendar.element.querySelector('#saveIndicator');
+  // saveAppData() can run while this window is closed — most notably when a
+  // GM's client is applying a player's socket-submitted event — so there may
+  // be no element to decorate.
+  const host = game.annwnCalendar?.element;
+  if (!host) return;
+
+  let ind = host.querySelector('#saveIndicator');
   if (!ind) {
     ind = document.createElement('div');
     ind.id = 'saveIndicator';
     ind.style.cssText = 'position:absolute;bottom:18px;right:18px;background:var(--primary);color:#fff;padding:6px 14px;border-radius:20px;font-size:0.78rem;font-family:\'Cinzel\',serif;letter-spacing:0.05em;opacity:0;transition:opacity 0.3s;pointer-events:none;z-index:9999;';
     ind.textContent = '✓ Saved';
-    game.annwnCalendar.element.appendChild(ind);
+    host.appendChild(ind);
   }
   ind.style.opacity = '1';
   clearTimeout(ind._t);
@@ -1198,67 +1530,69 @@ function exportJSON() {
 
 
 function openAddSeasonModal() {
-  document.getElementById('seasonModalTitle').textContent = 'Add Season';
-  document.getElementById('editingSeasonId').value = '';
-  document.getElementById('sName').value = '';
-  document.getElementById('sColor').value = '#2ecc71';
-  document.getElementById('sBaseTemp').value = '';
-  document.getElementById('sTempVar').value = '';
-  document.getElementById('sRain').value = '';
-  document.getElementById('sStorm').value = '';
+  if (!requireGM("manage seasons")) return;
+  byId('seasonModalTitle').textContent = 'Add Season';
+  byId('editingSeasonId').value = '';
+  byId('sName').value = '';
+  byId('sColor').value = '#2ecc71';
+  byId('sBaseTemp').value = '';
+  byId('sTempVar').value = '';
+  byId('sRain').value = '';
+  byId('sStorm').value = '';
   setSeasonTempMode('override');
   buildSeasonMonthSelects();
-  document.getElementById('sStartMonth').value = 0;
-  document.getElementById('sStartDay').value = 1;
-  document.getElementById('sEndMonth').value = 2;
-  document.getElementById('sEndDay').value = cal.months[2].length;
-  document.getElementById('seasonModal').classList.add('open');
+  byId('sStartMonth').value = 0;
+  byId('sStartDay').value = 1;
+  byId('sEndMonth').value = 2;
+  byId('sEndDay').value = cal.months[2].length;
+  byId('seasonModal').classList.add('open');
 }
 
 function buildSeasonMonthSelects() {
   const opts = cal.months.map((m,i)=>`<option value="${i}">${m.name}</option>`).join('');
-  document.getElementById('sStartMonth').innerHTML = opts;
-  document.getElementById('sEndMonth').innerHTML = opts;
+  byId('sStartMonth').innerHTML = opts;
+  byId('sEndMonth').innerHTML = opts;
 }
 
 function setSeasonTempMode(mode) {
-  document.getElementById('sModeOverride').classList.toggle('active', mode === 'override');
-  document.getElementById('sModeOffset').classList.toggle('active', mode === 'offset');
-  document.getElementById('sBaseTempLabel').textContent =
+  byId('sModeOverride').classList.toggle('active', mode === 'override');
+  byId('sModeOffset').classList.toggle('active', mode === 'offset');
+  byId('sBaseTempLabel').textContent =
     mode === 'offset' ? 'Temp Offset (°C, +/-)' : 'Season Base Temp (°C)';
-  document.getElementById('sBaseTemp').placeholder =
+  byId('sBaseTemp').placeholder =
     mode === 'offset' ? 'e.g. -15 for winter' : 'e.g. 5 for winter';
-  document.getElementById('sTemperatureHint').textContent =
+  byId('sTemperatureHint').textContent =
     mode === 'offset'
       ? 'Added on top of the region\'s base values. Temperature, rain %, and storm % fields are all treated as offsets (e.g. +20% rain). Leave blank for no offset.'
       : 'Sets absolute values for this season, ignoring the region. Leave blank to use the region default.';
 
-  if(document.getElementById('sRainLabel')) {
-    document.getElementById('sRainLabel').textContent  = mode === 'offset' ? 'Rain Chance Offset (%, +/-)' : 'Rain Chance Override (%)';
-    document.getElementById('sStormLabel').textContent = mode === 'offset' ? 'Storm Chance Offset (%, +/-)' : 'Storm Chance Override (%)';
-    document.getElementById('sRain').placeholder  = mode === 'offset' ? 'e.g. +20 wetter, -10 drier' : 'leave blank = region default';
-    document.getElementById('sStorm').placeholder = mode === 'offset' ? 'e.g. +15 stormier' : 'leave blank = region default';
+  if(byId('sRainLabel')) {
+    byId('sRainLabel').textContent  = mode === 'offset' ? 'Rain Chance Offset (%, +/-)' : 'Rain Chance Override (%)';
+    byId('sStormLabel').textContent = mode === 'offset' ? 'Storm Chance Offset (%, +/-)' : 'Storm Chance Override (%)';
+    byId('sRain').placeholder  = mode === 'offset' ? 'e.g. +20 wetter, -10 drier' : 'leave blank = region default';
+    byId('sStorm').placeholder = mode === 'offset' ? 'e.g. +15 stormier' : 'leave blank = region default';
   }
 }
 
 function saveSeason() {
-  const name = document.getElementById('sName').value.trim();
+  if (!requireGM("manage seasons")) return;
+  const name = byId('sName').value.trim();
   if(!name) return;
   if(!appData.seasons) appData.seasons = [];
-  const editId = document.getElementById('editingSeasonId').value;
-  const tempMode = document.getElementById('sModeOffset').classList.contains('active') ? 'offset' : 'override';
+  const editId = byId('editingSeasonId').value;
+  const tempMode = byId('sModeOffset').classList.contains('active') ? 'offset' : 'override';
   const data = {
     name,
-    color: document.getElementById('sColor').value,
-    startMonth: parseInt(document.getElementById('sStartMonth').value),
-    startDay: parseInt(document.getElementById('sStartDay').value)||1,
-    endMonth: parseInt(document.getElementById('sEndMonth').value),
-    endDay: parseInt(document.getElementById('sEndDay').value)||30,
-    baseTemp: document.getElementById('sBaseTemp').value,
-    tempVar: document.getElementById('sTempVar').value,
+    color: byId('sColor').value,
+    startMonth: parseInt(byId('sStartMonth').value),
+    startDay: parseInt(byId('sStartDay').value)||1,
+    endMonth: parseInt(byId('sEndMonth').value),
+    endDay: parseInt(byId('sEndDay').value)||30,
+    baseTemp: byId('sBaseTemp').value,
+    tempVar: byId('sTempVar').value,
     tempMode,
-    rain: document.getElementById('sRain').value,
-    storm: document.getElementById('sStorm').value,
+    rain: byId('sRain').value,
+    storm: byId('sStorm').value,
   };
   if(editId) {
     const idx = appData.seasons.findIndex(s=>s.id===editId);
@@ -1266,41 +1600,43 @@ function saveSeason() {
   } else {
     appData.seasons.push({ id: uid(), ...data });
   }
-  document.getElementById('seasonModal').classList.remove('open');
+  byId('seasonModal').classList.remove('open');
   saveAppData();
   renderSeasons();
-  if(document.getElementById('calView').classList.contains('active')) renderMonth();
+  if(byId('calView').classList.contains('active')) renderMonth();
 }
 
 function editSeason(id) {
+  if (!requireGM("manage seasons")) return;
   const s = (appData.seasons||[]).find(s=>s.id===id);
   if(!s) return;
-  document.getElementById('seasonModalTitle').textContent = 'Edit Season';
-  document.getElementById('editingSeasonId').value = id;
-  document.getElementById('sName').value = s.name;
-  document.getElementById('sColor').value = s.color||'#2ecc71';
-  document.getElementById('sBaseTemp').value = s.baseTemp||'';
-  document.getElementById('sTempVar').value = s.tempVar||'';
-  document.getElementById('sRain').value = s.rain||'';
-  document.getElementById('sStorm').value = s.storm||'';
+  byId('seasonModalTitle').textContent = 'Edit Season';
+  byId('editingSeasonId').value = id;
+  byId('sName').value = s.name;
+  byId('sColor').value = s.color||'#2ecc71';
+  byId('sBaseTemp').value = s.baseTemp||'';
+  byId('sTempVar').value = s.tempVar||'';
+  byId('sRain').value = s.rain||'';
+  byId('sStorm').value = s.storm||'';
   setSeasonTempMode(s.tempMode||'override');
   buildSeasonMonthSelects();
-  document.getElementById('sStartMonth').value = s.startMonth;
-  document.getElementById('sStartDay').value = s.startDay;
-  document.getElementById('sEndMonth').value = s.endMonth;
-  document.getElementById('sEndDay').value = s.endDay;
-  document.getElementById('seasonModal').classList.add('open');
+  byId('sStartMonth').value = s.startMonth;
+  byId('sStartDay').value = s.startDay;
+  byId('sEndMonth').value = s.endMonth;
+  byId('sEndDay').value = s.endDay;
+  byId('seasonModal').classList.add('open');
 }
 
 function deleteSeason(id) {
+  if (!requireGM("manage seasons")) return;
   if(!confirm('Delete this season?')) return;
   appData.seasons = (appData.seasons||[]).filter(s=>s.id!==id);
   saveAppData(); renderSeasons();
-  if(document.getElementById('calView').classList.contains('active')) renderMonth();
+  if(byId('calView').classList.contains('active')) renderMonth();
 }
 
 function renderSeasons() {
-  const el = document.getElementById('seasonList');
+  const el = byId('seasonList');
   const seasons = appData.seasons||[];
   if(!seasons.length) {
     el.innerHTML = '<div class="no-events" style="padding:24px;">No seasons defined yet. Add one to enable seasonal weather variation and calendar tinting.</div>';
@@ -1344,6 +1680,7 @@ function renderSeasons() {
 }
 
 function autoGenerateAllWeather() {
+  if (!requireGM("generate weather")) return;
   const regions = appData.regions||[];
   const region = regions[0] || null;
 
@@ -1377,6 +1714,7 @@ function autoGenerateAllWeather() {
 }
 
 function autoGenerateForRegion(regionId) {
+  if (!requireGM("generate weather")) return;
   const region = (appData.regions||[]).find(r=>r.id===regionId);
   if(!region) return;
   const confirmed = confirm(
@@ -1400,15 +1738,16 @@ function autoGenerateForRegion(regionId) {
 }
 
 function autoGenerateWeatherForDay(year, monthIdx, day) {
+  if (!requireGM("generate weather")) return;
 
   const regions = appData.regions||[];
   const region = regions[0]||null;
   const w = autoWeatherForDay(year, monthIdx, day, region);
   selectedWeatherCond = w.condition;
-  document.getElementById('wTemp').value = w.temp;
-  document.getElementById('wPrecip').value = w.precip;
-  document.getElementById('wClouds').value = w.clouds;
-  document.getElementById('wDesc').value = w.desc;
+  byId('wTemp').value = w.temp;
+  byId('wPrecip').value = w.precip;
+  byId('wClouds').value = w.clouds;
+  byId('wDesc').value = w.desc;
   buildWeatherCondGrid();
 }
 
@@ -1437,7 +1776,7 @@ function formatTempUnit() {
 }
 
 function showWeatherTip(event, id) {
-  const tip = document.getElementById(id);
+  const tip = byId(id);
   if(!tip) return;
   const rect = event.currentTarget.getBoundingClientRect();
   tip.style.display = 'block';
@@ -1450,17 +1789,16 @@ function showWeatherTip(event, id) {
   tip.style.top  = top  + 'px';
 }
 function hideWeatherTip(id) {
-  const tip = document.getElementById(id);
+  const tip = byId(id);
   if(tip) tip.style.display = 'none';
 }
 function setSelectedDayAsToday() {
+  if (!requireGM("set the current in-game date")) return;
   if(selectedDay === null || selectedDay === undefined) return;
   currentGameDate = { year: currentYear, month: currentMonthIdx, day: selectedDay };
   appData.currentDate = currentGameDate;
   saveAppData();
-  syncNavUI();
-  renderMonth();
-  renderHome();
+  refreshDateViews();
 }
 
 
@@ -1480,6 +1818,10 @@ Hooks.once("init", () => {
 
 Hooks.once("ready", () => {
   game.annwnCalendar = new AnnwnCalendarApp();
+
+  // Players can't write world settings, so their event changes come in
+  // over this channel and the primary GM's client performs the save.
+  game.socket.on(SOCKET_NAME, onCalendarSocket);
 
   // Every inline onclick="..." attribute inside calendar.html (and inside
   // the HTML strings these functions themselves generate, e.g. day cells,
@@ -1527,17 +1869,32 @@ window.setSeasonTempMode = setSeasonTempMode;
 window.setSelectedDayAsToday = setSelectedDayAsToday;
 window.showWeatherTip = showWeatherTip;
 window.switchView = switchView;
+window.toggleImportant = toggleImportant;   // <- was missing: the star button's
+                                            //    onclick had no global to call,
+                                            //    so every click was a no-op.
 window.toggleTheme = toggleTheme;
 window.updateSwatch = updateSwatch;
 window.openFilePicker = openFilePicker;
 });
 
-// Re-render the open calendar window when the shared config changes, so
-// every connected client stays in sync automatically.
+// Keep every connected client in sync when the shared calendar changes.
+//
+// This used to call game.annwnCalendar.render(), which rebuilds the whole
+// window — and because saving fires updateSetting on the saving client too,
+// the GM's own "next day" / "set date" click bounced straight back as a full
+// reload that dumped them on the Home tab. Now a client ignores the echo of
+// its own write, and a genuinely remote change repaints in place.
 Hooks.on("updateSetting", (setting) => {
-  if (setting.key === `${MODULE_ID}.${SETTING_KEY}`) {
-    if (game.annwnCalendar?.rendered) game.annwnCalendar.render();
+  if (setting.key !== `${MODULE_ID}.${SETTING_KEY}`) return;
+  if (!game.annwnCalendar?.rendered) return;
+
+  let value = setting.value;
+  if (typeof value === "string") {
+    try { value = JSON.parse(value); } catch (e) { value = null; }
   }
+  if (value && value._rev && value._rev === _lastLocalRev) return;  // our own save
+
+  softRefresh();
 });
 
 // Add a full-width "Open Calendar" button at the bottom of the Journal
