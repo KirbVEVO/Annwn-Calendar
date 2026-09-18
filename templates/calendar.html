@@ -26,8 +26,7 @@
         <button class="btn-icon" onclick="toggleTheme()">Light</button>
         <button class="btn-icon" onclick="openSetDateModal()">📍 Set Current Date</button>
         <button class="btn-icon" onclick="advanceDay()" title="Advance the current in-game date by one day">⏭ Next Day</button>
-        <button class="btn-icon" onclick="exportJSON()">💾 Save</button>
-      </div>
+        </div>
     </div>
 
     <div id="views">
@@ -68,9 +67,6 @@
             <input type="text" class="search-input" id="sideSearch" placeholder="Search events…" oninput="renderSidebar()">
           </div>
           <div class="sidebar-events" id="sideEventList"></div>
-          <div style="padding:12px;">
-            <button onclick="exportJSON()" style="padding:14px; background:var(--primary); color:white; border:none; border-radius:6px; cursor:pointer; font-weight:bold; margin-top: 10px;">SAVE DATA</button>
-          </div>
         </div>
         <div class="cal-main">
           <div class="cal-header">

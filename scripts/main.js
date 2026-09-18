@@ -21,7 +21,12 @@ class AnnwnCalendarApp extends HandlebarsApplicationMixin(ApplicationV2) {
 
   /** Runs after the template HTML is in the DOM. */
   _onRender(context, options) {
-    this.element.dataset.theme = "dark";
+    // Important: the CSS's @scope targets .annwn-calendar-root, a CHILD
+    // of this.element (the part template's own root), not this.element
+    // itself. Setting data-theme on this.element doesn't match
+    // :scope[data-theme="dark"] in the CSS — this was the actual bug
+    // behind "light/dark mode doesn't work."
+    this.element.querySelector('.annwn-calendar-root').dataset.theme = "dark";
 
     // These two listeners were module-top-level in the original standalone
     // page (the DOM already existed when that <script> ran). Here they have
@@ -86,21 +91,64 @@ const WEATHER_CONDITIONS = [
   { id:"wind", icon:"Windy", label:"Windy" },
 ];
 
-// Fallback calendar structure used only if the world setting has never
-// been populated (e.g. brand new world, nothing imported yet). Shaped
-// like your Timeline.json's calendars[0].
+// Default calendar structure and starting data — your real Annwn
+// calendar (from Timeline.json), so a fresh world works immediately
+// without requiring a manual import first.
 const DEFAULT_CAL = {
   hasZeroYear: true, epochWeekday: 0, weekResetsEachMonth: false,
-  months: [{ name: "Month 1", length: 30 }],
-  weekdays: [{ name: "Day 1" }],
+  months: [
+    { name: "Hammer", length: 30 }, { name: "Alturiak", length: 30 },
+    { name: "Ches", length: 30 }, { name: "Tarsakh", length: 30 },
+    { name: "Mirtul", length: 31 }, { name: "Kythorn", length: 30 },
+    { name: "Flamerule", length: 30 }, { name: "Eleasis", length: 30 },
+    { name: "Eleint", length: 30 }, { name: "Marpenoth", length: 30 },
+    { name: "Uktar", length: 30 }, { name: "Nightal", length: 30 }
+  ],
+  weekdays: [
+    { name: "Elday" }, { name: "Magday" }, { name: "Aeronday" },
+    { name: "Helmday" }, { name: "Lorday" }, { name: "Vecday" },
+    { name: "Mamonday" }, { name: "Arianday" }, { name: "Mephday" },
+    { name: "Araday" }
+  ],
   hoursInDay: 24, minutesInHour: 60,
   positiveEras: [{ abbr: "PC" }],
   negativeEra: { abbr: "DC" },
-  moons: []
+  moons: [{ name: "Moon", phase: 42524.0463, shift: 15238, color: "#FFFFFF" }]
 };
 const DEFAULT_APP = {
-  events: [], weather: {}, regions: [], seasons: [],
-  currentDate: { year: 1, month: 0, day: 1 }
+  events: [
+    { id: "pxpxcz8h1", name: "Moonlight Bedivere Meeting", description: "", category: "time", location: "Core Spire, Archon", startH: "10", startM: "", endH: "14", endM: "", color: "#9c3d3d", recur: "none", important: true, duration: 1, year: 534, month: 7, day: 14 },
+    { id: "ahoes59og", name: "Archon Peace Festival", description: "", category: "world", location: "Archon, Blackrose Wilds", startH: "9", startM: "", endH: "20", endM: "", color: "#3d6a9c", recur: "1y", important: false, duration: 2, year: 534, month: 6, day: 29 },
+    { id: "4dnz2w9qe", name: "Mar Owes Goblin People", description: "", category: "personal", location: "Blackrose Wilds", startH: "", startM: "", endH: "", endM: "", color: "#c9a84c", recur: "none", important: true, duration: 1, year: 534, month: 7, day: 5 },
+    { id: "gkdbbd7o3", name: "Beginning of Post Calamity", description: "After the Great Calamity, the world is plunged into chaos, and so starts a new Era.", category: "world", location: "Cartref", startH: "", startM: "", endH: "", endM: "", color: "#9c3d3d", recur: "none", important: false, duration: 1, year: 0, month: 0, day: 1 },
+    { id: "79invx080", name: "The Great Calamity Ending", description: "The final days of the Great Calamity.", category: "world", location: "Cartref", startH: "", startM: "", endH: "", endM: "", color: "#3d6a9c", recur: "none", important: false, duration: 46, year: -1, month: 10, day: 15 },
+    { id: "2mkscigv3", name: "Oneshot Muc Mhara", description: "", category: "world", location: "Beryl Sea", startH: "", startM: "", endH: "", endM: "", color: "#c9a84c", recur: "none", important: false, duration: 1, year: 365, month: 3, day: 13 },
+    { id: "5kyiq6al4", name: "Players Jailed by Karstaag", description: "The date that 'Pasnet Nightbrook', 'Ishmael Cupric', and 'Russel Dalkhin' were abducted and taken to a prison belonging to the 'Prophecy of the New Dawn' cult.", category: "personal", location: "Cult Prison, Archon", startH: "", startM: "", endH: "", endM: "", color: "#c9a84c", recur: "none", important: false, duration: 1, year: 534, month: 6, day: 16 },
+    { id: "7nqvu8iki", name: "Zhar Gameyun Joins the Party", description: "The 3 Lost Prisoners rescue Zhar Gameyun and offers him to join them.", category: "personal", location: "Goradire", startH: "", startM: "", endH: "", endM: "", color: "#ffaa00", recur: "none", important: false, duration: 1, year: 534, month: 6, day: 23 },
+    { id: "hgu6h5uv9", name: "Luminex Machyra Joins the Party", description: "The party finds Luminex Machyra in his cave after Yuldarra attempted to trick them into stealing his heart as a power source. The party offered him to join them.", category: "world", location: "Underground Archon", startH: "", startM: "", endH: "", endM: "", color: "#9a70cc", recur: "none", important: false, duration: 1, year: 534, month: 6, day: 29 },
+    { id: "fsn3ufj9h", name: "Eshteross Birthday", description: "Lord Ariks Eshteross was born on the 20th of Marpenoth, 481 PC.", category: "birthday", location: "Galehaven", startH: "", startM: "", endH: "", endM: "", color: "#9c3d3d", recur: "1y", important: false, duration: 1, year: 481, month: 9, day: 20 },
+    { id: "hw1tve5ay", name: "The Five Year War Begins", description: "The small town of Jizamran in Galehaven gets invaded by the Alabaster Throne of the Churning Mists, Beginning the Five Year War.", category: "world", location: "Jizamran, Galehaven", startH: "14", startM: "00", endH: "", endM: "", color: "#3d6a9c", recur: "none", important: false, duration: 1, year: 509, month: 3, day: 1 },
+    { id: "kpccceb8y", name: "Five Year War Ends", description: "After a 5 year conflict, leaving both sides exhausted and without victory, the Alabaster Throne of the Churning Mists and the Court of the Lambent Path of Galehaven come to a truce.", category: "world", location: "Churning Mists, Galehaven", startH: "12", startM: "00", endH: "13", endM: "00", color: "#3d6a9c", recur: "none", important: false, duration: 1, year: 514, month: 7, day: 16 },
+    { id: "msvkp9isx", name: "Karstaag & Arcano Are defeated", description: "The Lost Prisoners fell into Karstaag's trap, however, he vastly underestimated their potential in combat.", category: "personal", location: "The Death Talon Crypt", startH: "", startM: "", endH: "", endM: "", color: "#70cc9a", recur: "none", important: true, duration: 1, year: 534, month: 7, day: 4 }
+  ],
+  weather: { "534_7_14": { condition: "storm", temp: 22, desc: "Thunderstorm", precip: 90, clouds: 90 } },
+  regions: [
+    { id: "xx1xxq41m", name: "The Blackrose Wilds", baseTemp: 28, rain: 80, clouds: 70, storm: 35, tempVar: 5 },
+    { id: "p5vzupbpl", name: "The Churning Mists", baseTemp: 18, rain: 50, clouds: 90, storm: 10, tempVar: 8 },
+    { id: "2gj8ht9yr", name: "Galehaven", baseTemp: 31, rain: 80, clouds: 70, storm: 40, tempVar: 2 },
+    { id: "s5stzhlqb", name: "Cragfall Valley", baseTemp: 34, rain: 4, clouds: 2, storm: 3, tempVar: 15 },
+    { id: "m3vglrn90", name: "Alik'r Desert", baseTemp: 42, rain: 2, clouds: 5, storm: 10, tempVar: 15 },
+    { id: "4p6f6lwd1", name: "Anequina Sands", baseTemp: 30, rain: 30, clouds: 40, storm: 10, tempVar: 8 },
+    { id: "jlck9s124", name: "Aggrad Mountains", baseTemp: 4, rain: 45, clouds: 50, storm: 30, tempVar: 11 },
+    { id: "9sjmpnmtc", name: "Islands Of Dusk", baseTemp: 27, rain: 50, clouds: 45, storm: 35, tempVar: 3 }
+  ],
+  seasons: [
+    { id: "c2g9dn08o", name: "Spring", color: "#2ecc71", startMonth: 1, startDay: 1, endMonth: 3, endDay: 30, baseTemp: "-2", tempVar: "4", tempMode: "offset", rain: "20", storm: "10" },
+    { id: "oqrzkrwcx", name: "Summer", color: "#ffff00", startMonth: 4, startDay: 1, endMonth: 6, endDay: 30, baseTemp: "10", tempVar: "6", tempMode: "offset", rain: "-15", storm: "10" },
+    { id: "drgucl2am", name: "Autumn", color: "#ffaa00", startMonth: 7, startDay: 1, endMonth: 9, endDay: 30, baseTemp: "0", tempVar: "4", tempMode: "offset", rain: "30", storm: "30" },
+    { id: "0wlasoi5y", name: "Winter", color: "#0000ff", startMonth: 10, startDay: 1, endMonth: 0, endDay: 30, baseTemp: "-15", tempVar: "5", tempMode: "offset", rain: "-20", storm: "10" }
+  ],
+  currentDate: { year: 534, month: 7, day: 4 }
 };
 
 /** Pull cal/appData out of the world-scoped setting into module state. */
@@ -1365,7 +1413,7 @@ function autoGenerateWeatherForDay(year, monthIdx, day) {
 }
 
 function toggleTheme() {
-  const body = game.annwnCalendar.element;
+  const body = game.annwnCalendar.element.querySelector('.annwn-calendar-root');
   const currentTheme = body.getAttribute('data-theme');
   const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
   body.setAttribute('data-theme', newTheme);
