@@ -1,5 +1,12 @@
 @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Crimson+Pro:ital,wght@0,300;0,400;0,600;1,300;1,400&display=swap');
 
+/*
+ * Everything below is scoped to .annwn-calendar-root, so none of these
+ * rules can leak out and affect the rest of Foundry's UI. This is why
+ * enabling the module was squishing/reflowing the whole application
+ * before: "*", "body", and ":root" were previously unscoped and applied
+ * globally to every page Foundry rendered.
+ */
 @scope (.annwn-calendar-root) {
 
 :scope {
